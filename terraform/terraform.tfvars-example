@@ -1,0 +1,16 @@
+# Copy this file to terraform.tfvars and replace the placeholder values.
+# No OVH API credentials belong here; provide them through the OVH provider's
+# supported environment variables instead.
+project_id    = "your-public-cloud-project-id"
+instance_name = "small-docker-vm"
+region        = "your-ovhcloud-region"
+
+# The budget-oriented target: 2 vCPU, 4 GiB RAM, 25 GiB local storage, low networking.
+flavor_name = "d2-2"
+image_name  = "Ubuntu 24.04"
+
+# Use an absolute path (Terraform does not expand ~ in file paths).
+ssh_public_key_path = "/absolute/path/to/id_ed25519.pub"
+
+# false selects hourly billing.
+monthly_billing = false
