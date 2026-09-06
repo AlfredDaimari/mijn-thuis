@@ -1,0 +1,29 @@
+---
+- name: Update the VM and install Docker
+  hosts: docker_hosts
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Update APT package metadata and upgrade installed packages
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 0
+        upgrade: dist
+
+    - name: Install Docker Engine from the distribution repository
+      ansible.builtin.apt:
+        name: docker.io
+        state: present
+
+    - name: Enable and start Docker
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Allow the SSH user to run Docker without sudo
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
