@@ -18,4 +18,17 @@ For convenience, use `./run-poller.sh` and `./run-processor.sh` from `query/`. `
 
 `./run-resolver.sh` is the third process. It uses local headless Chromium through Playwright, not Browserbase. Paste a logged-in Stekkies browser Cookie header into the Git-ignored `values.yaml`; Playwright loads those cookies into its browser context, opens the exact emailed **View match** link, and follows the rendered listing action (currently **Go to listing**) to write the external provider URL to `data/resolved.sqlite3` with `is_read = 0`. It marks the source listing read only after that write succeeds. Failed navigations/clicks log the failure step, browser URLs, action URL, page title, and traceback, then stay unread for a later retry. The resolver waits a random 20–35 seconds between attempts. Install the browser once with `python3 -m playwright install chromium`. Cookies expire; replace the value after logging into Stekkies again.
 
+### Docker
+
+Build the image with `docker build -t house-query-service ./query`, then create its persistent database volume once with `docker volume create house-query-data`. The image does not contain `values.yaml` or `data/`. Mount both at runtime; the configured database paths default to `/app/data/...` because the container runs in `/app`.
+
+```bash
+docker run --rm --init \
+  --mount type=bind,src="$(pwd)/query/values.yaml",dst=/app/values.yaml,readonly \
+  --mount type=volume,src=house-query-data,dst=/app/data \
+  house-query-service
+```
+
+That starts the Yahoo poller. Run the other single-process consumers with the same two mounts and an overriding command: `house-query-service python -m query_service.processor` or `house-query-service python -m query_service.resolver`. Each store creates its configured SQLite file if it is absent. `--init` forwards signals cleanly to Python and Chromium.
+
 For a controlled live-flow demonstration, run `RUN_LIVE_YAHOO_TEST=1 python3 -m unittest discover -s tests -p 'test_live_email_flow.py' -v` from `query/`. This is skipped by default. It reads one current Stekkies email from Yahoo without changing mailbox state, copies it to `query/data/test.sqlite3`, marks only the copied row unread, runs the processor, and asserts that extracted URLs are logged and queued in its test-only listings database. It never changes the configured production databases.
