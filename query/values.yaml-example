@@ -1,0 +1,8 @@
+# Copy to values.yaml. `password` must be a Yahoo app password, not your normal
+# Yahoo password. Keep this file private; values.yaml is Git-ignored.
+email: "you@yahoo.com"
+password: "your-yahoo-app-password"
+# The poller writes full emails to staging; the processor writes extracted
+# listings to the second database. Both queues have their own is_read state.
+staging_database: "data/staging.sqlite3"
+listings_database: "data/listings.sqlite3"
