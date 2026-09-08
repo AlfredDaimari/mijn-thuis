@@ -1,0 +1,10 @@
+# Credentials and persistent SQLite state are runtime mounts, never image input.
+values.yaml
+data/
+
+# Development-only material.
+__pycache__/
+*.py[cod]
+tests/
+test.sh
+run-*.sh
