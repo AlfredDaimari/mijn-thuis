@@ -19,9 +19,9 @@ def raw_email(body: str) -> bytes:
 
 class ListingProcessorTests(unittest.TestCase):
     def test_extracts_html_link_and_anchor_title(self) -> None:
-        listings = extract_listings(raw_email('<a href="https://houses.test/42">Two-bedroom home</a>'))
+        listings = extract_listings(raw_email('<a href="https://houses.test/42">View match: Two-bedroom home</a>'))
         self.assertEqual(listings[0].url, "https://houses.test/42")
-        self.assertEqual(listings[0].title, "Two-bedroom home")
+        self.assertEqual(listings[0].title, "View match: Two-bedroom home")
 
     def test_excludes_tracking_assets_and_unsubscribe_urls(self) -> None:
         listings = extract_listings(
@@ -31,20 +31,20 @@ class ListingProcessorTests(unittest.TestCase):
                 <a href="https://www.stekkies.com/static/banner.png">asset</a>
                 <a href="https://agency.test/images/property-42">asset without suffix</a>
                 <a href="https://www.stekkies.com/unsubscribe/token">unsubscribe</a>
-                <a href="https://www.stekkies.com/nl/api/v1/redirect/listing-id">listing</a>
+                <a href="https://www.stekkies.com/nl/api/v1/redirect/listing-id">View match</a>
                 """
             )
         )
         self.assertEqual(
             listings,
-            [Listing("https://www.stekkies.com/nl/api/v1/redirect/listing-id", "listing")],
+            [Listing("https://www.stekkies.com/nl/api/v1/redirect/listing-id", "View match")],
         )
 
     def test_processor_marks_successful_email_read(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             staging_store = SeenEmailStore(Path(directory) / "staging.sqlite3")
             listing_store = ListingStore(Path(directory) / "listings.sqlite3")
-            staging_store.remember_if_new("signature", "<id>", "alerts@stekkies.com", "Listings", raw_email("https://houses.test/42"))
+            staging_store.remember_if_new("signature", "<id>", "alerts@stekkies.com", "Listings", raw_email('<a href="https://houses.test/42">View match</a>'))
             self.assertEqual(process_once(staging_store, listing_store), 1)
             self.assertEqual(staging_store.unread_emails(), [])
             queued_listings = listing_store.unread_listings()

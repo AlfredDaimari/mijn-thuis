@@ -53,6 +53,10 @@ def _is_listing_url(url: str) -> bool:
     parsed = urlparse(unescape(url))
     host = parsed.netloc.lower().split(":")[0]
     path = parsed.path.lower()
+    # The actionable email button is a Stekkies tracking wrapper. It must be
+    # retained exactly so the resolver can follow the same path as a click.
+    if host == "email.stekkies.com" and path.startswith("/e/c/"):
+        return True
     if not host or host in NON_LISTING_HOSTS:
         return False
     if path.endswith(ASSET_SUFFIXES):
@@ -68,6 +72,11 @@ def _is_listing_url(url: str) -> bool:
     return True
 
 
+def _is_listing_button(title: str | None) -> bool:
+    normalized = (title or "").casefold()
+    return "view match" in normalized or "view listing" in normalized
+
+
 def extract_listings(raw_message: bytes) -> list[Listing]:
     """Extract unique HTTP(S) listing links and optional anchor titles from an email."""
     message: EmailMessage = BytesParser(policy=policy.default).parsebytes(raw_message)
@@ -76,8 +85,9 @@ def extract_listings(raw_message: bytes) -> list[Listing]:
 
     parser = _AnchorParser()
     parser.feed(body)
-    found.extend(parser.anchors)
-    found.extend(Listing(url, None) for url in URL_PATTERN.findall(body))
+    # Listing emails provide the actionable destination through this button.
+    # Do not treat image, tracking, or marketing URLs as a house listing.
+    found.extend(anchor for anchor in parser.anchors if _is_listing_button(anchor.title))
 
     unique: dict[str, Listing] = {}
     for listing in found:
