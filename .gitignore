@@ -3,3 +3,5 @@ venv/
 *.tfstate
 *.tfstate.*
 terraform/terraform.tfvars
+query/values.yaml
+query/*.sqlite3
