@@ -5,3 +5,11 @@ venv/
 terraform/terraform.tfvars
 query/values.yaml
 query/data/
+
+# Python bytecode and test-run artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
