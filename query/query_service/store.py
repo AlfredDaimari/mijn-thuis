@@ -213,3 +213,80 @@ class ListingStore:
 
     def close(self) -> None:
         self.connection.close()
+
+
+@dataclass(frozen=True)
+class ResolvedListing:
+    source_signature: str
+    source_url: str
+    resolved_url: str
+    title: str | None
+    source_subject: str
+
+
+class ResolvedListingStore:
+    """Durable queue of housing-provider URLs resolved in the browser."""
+
+    def __init__(self, database_path: str | Path) -> None:
+        Path(database_path).parent.mkdir(parents=True, exist_ok=True)
+        self.connection = sqlite3.connect(database_path, timeout=10)
+        self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute("PRAGMA busy_timeout=10000")
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS resolved_listings (
+                source_signature TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                resolved_url TEXT NOT NULL,
+                title TEXT,
+                source_subject TEXT NOT NULL,
+                is_read INTEGER NOT NULL DEFAULT 0 CHECK (is_read IN (0, 1)),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                read_at TEXT,
+                PRIMARY KEY (source_signature, source_url, resolved_url)
+            )
+            """
+        )
+        self.connection.commit()
+
+    def add_if_new(self, listing: QueuedListing, resolved_url: str) -> bool:
+        cursor = self.connection.execute(
+            """
+            INSERT OR IGNORE INTO resolved_listings
+                (source_signature, source_url, resolved_url, title, source_subject, is_read)
+            VALUES (?, ?, ?, ?, ?, 0)
+            """,
+            (
+                listing.source_signature,
+                listing.url,
+                resolved_url,
+                listing.title,
+                listing.source_subject,
+            ),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
+    def unread_listings(self, limit: int = 50) -> list[ResolvedListing]:
+        rows = self.connection.execute(
+            """
+            SELECT source_signature, source_url, resolved_url, title, source_subject
+            FROM resolved_listings WHERE is_read = 0
+            ORDER BY created_at, resolved_url LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [ResolvedListing(*row) for row in rows]
+
+    def mark_read(self, source_signature: str, source_url: str, resolved_url: str) -> None:
+        self.connection.execute(
+            """
+            UPDATE resolved_listings SET is_read = 1, read_at = CURRENT_TIMESTAMP
+            WHERE source_signature = ? AND source_url = ? AND resolved_url = ?
+            """,
+            (source_signature, source_url, resolved_url),
+        )
+        self.connection.commit()
+
+    def close(self) -> None:
+        self.connection.close()
