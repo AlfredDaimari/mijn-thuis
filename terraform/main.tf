@@ -11,36 +11,41 @@ terraform {
 
 provider "ovh" {}
 
-resource "ovh_cloud_project_ssh_key" "vm" {
-  service_name = var.project_id
-  region       = var.region
-  name         = "${var.instance_name}-ssh"
-  public_key   = file(var.ssh_public_key_path)
+# Orders one OVHcloud VPS, rather than a Public Cloud instance. The VPS product
+# includes its normal public network access; no Public Cloud project, network,
+# or SSH-key resource is required.
+resource "ovh_vps" "vm" {
+  display_name   = var.instance_name
+  ovh_subsidiary = var.ovh_subsidiary
+
+  # OVH requires image_id when a public SSH key is supplied during creation.
+  image_id       = var.image_id
+  public_ssh_key = file(var.ssh_public_key_path)
+
+  plan = [{
+    duration     = "P1M"
+    plan_code    = var.vps_plan_code
+    pricing_mode = "default"
+
+    configuration = [
+      {
+        label = "vps_datacenter"
+        value = var.datacenter
+      },
+      {
+        label = "vps_os"
+        value = var.os_name
+      }
+    ]
+  }]
 }
 
-# A Discovery instance is intended for low-cost, non-production workloads.
-# `d2-2` is the small profile targeted here: 2 vCPU, 4 GiB RAM, 25 GiB local
-# storage, and low-bandwidth networking. Its availability varies by region.
-resource "ovh_cloud_project_instance" "vm" {
-  service_name = var.project_id
-  region       = var.region
-  name         = var.instance_name
-  flavor_name  = var.flavor_name
-  image_name   = var.image_name
-  # The public key is registered above, then selected for this instance.
-  ssh_key_name = ovh_cloud_project_ssh_key.vm.name
-
-  # Keeps the instance on hourly billing, which is more suitable while trying
-  # out a small instance. Change to true only when monthly billing is desired.
-  monthly_billing = var.monthly_billing
+output "vps_service_name" {
+  description = "OVHcloud VPS service name. Use the assigned public IPv4 from the OVHcloud Control Panel in Ansible inventory."
+  value       = ovh_vps.vm.name
 }
 
-output "instance_id" {
-  description = "OVHcloud instance ID."
-  value       = ovh_cloud_project_instance.vm.id
-}
-
-output "public_ip_addresses" {
-  description = "Public IP address records assigned to the instance; use its IPv4 address in Ansible inventory."
-  value       = ovh_cloud_project_instance.vm.ip_addresses
+output "vps_display_name" {
+  description = "Configured VPS display name."
+  value       = ovh_vps.vm.display_name
 }

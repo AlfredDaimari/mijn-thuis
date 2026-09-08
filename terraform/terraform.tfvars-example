@@ -1,16 +1,15 @@
-# Copy this file to terraform.tfvars and replace the placeholder values.
-# No OVH API credentials belong here; provide them through the OVH provider's
-# supported environment variables instead.
-project_id    = "your-public-cloud-project-id"
-instance_name = "small-docker-vm"
-region        = "your-ovhcloud-region"
+# Copy this file to terraform.tfvars and replace every placeholder value.
+# Do not put OVH API credentials in this file; use the provider's supported
+# environment variables. A default payment method is required to order a VPS.
+instance_name  = "house-bot"
+ovh_subsidiary = "NL"
 
-# The budget-oriented target: 2 vCPU, 4 GiB RAM, 25 GiB local storage, low networking.
-flavor_name = "d2-2"
-image_name  = "Ubuntu 24.04"
+# Select the current VPS-1 offering (2 vCores, 4 GB RAM, 40 GB NVMe) in the
+# OVHcloud Control Panel/catalog and place its exact plan and location values here.
+vps_plan_code = "your-vps-1-plan-code"
+datacenter    = "your-vps-datacenter-code"
+os_name       = "Ubuntu 24.04"
 
-# Use an absolute path (Terraform does not expand ~ in file paths).
+# OVH requires the matching image ID when supplying an SSH public key.
+image_id            = "your-ubuntu-image-id"
 ssh_public_key_path = "/absolute/path/to/id_ed25519.pub"
-
-# false selects hourly billing.
-monthly_billing = false
