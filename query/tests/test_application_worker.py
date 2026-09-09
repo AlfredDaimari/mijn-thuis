@@ -3,7 +3,10 @@
 import pytest
 
 from query_service.application_worker import process_once
+from query_service.config import ApplicantProfile
 from query_service.database import PipelineDatabase
+from query_service.form_automation import FormAutomationError
+from query_service.luna_form_planner import LunaFormPlanner
 
 
 def resolved_listing(database: PipelineDatabase) -> None:
@@ -56,3 +59,35 @@ def test_provider_worker_captures_evidence_then_stops_for_review(tmp_path, monke
         "https://www.stekkies.com/redirect/1",
         "https://provider.example/listing/1",
     ) == "awaiting_review"
+
+
+@pytest.mark.service
+def test_form_failure_persists_generic_and_luna_reason_in_application_error(tmp_path, monkeypatch) -> None:
+    """A failed fallback keeps its original generic reason observable in SQLite."""
+    database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
+    resolved_listing(database)
+    profile = ApplicantProfile("Ada", "Lovelace", "+31600000000", "ada@example.com", "Interested")
+
+    monkeypatch.setattr(
+        "query_service.application_worker._fill_for_review",
+        lambda *_args: (_ for _ in ()).throw(
+            FormAutomationError(
+                "generic form matching failed: no visible contact form; "
+                "Luna fallback failed: Luna found no safe navigation action: only login"
+            )
+        ),
+    )
+
+    assert process_once(
+        database,
+        tmp_path / "screenshots",
+        profile=profile,
+        planner=LunaFormPlanner("test-key"),
+    ) == 0
+
+    error = database.application_error(
+        "email-1", "https://www.stekkies.com/redirect/1", "https://provider.example/listing/1"
+    )
+    assert error is not None
+    assert "no visible contact form" in error
+    assert "Luna fallback failed" in error
