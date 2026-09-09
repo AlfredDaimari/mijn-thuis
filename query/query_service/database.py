@@ -126,6 +126,9 @@ class EmailDatabase:
             read_at TEXT,
             extraction_error TEXT
         );
+        -- Queue reads first filter unread work, then use the stable email ID.
+        CREATE INDEX IF NOT EXISTS seen_emails_unread_signature_idx
+            ON seen_emails (is_read, signature);
     """
 
     def __init__(self, database_path: str | Path) -> None:
@@ -148,7 +151,7 @@ class EmailDatabase:
             rows = connection.execute(
                 """SELECT signature, message_id, sender, subject, raw_message
                    FROM seen_emails WHERE is_read = 0
-                   ORDER BY first_read_at, signature LIMIT ?""",
+                   ORDER BY signature LIMIT ?""",
                 (limit,),
             ).fetchall()
             return [PendingEmail(*row) for row in rows if row[4] is not None]
@@ -198,6 +201,9 @@ class ListingDatabase:
             read_at TEXT,
             PRIMARY KEY (source_signature, url)
         );
+        -- Queue reads first filter unread work, then use the listing ID.
+        CREATE INDEX IF NOT EXISTS listings_unread_source_url_idx
+            ON listings (is_read, source_signature, url);
     """
 
     def __init__(self, database_path: str | Path) -> None:
@@ -221,7 +227,7 @@ class ListingDatabase:
                 QueuedListing(*row)
                 for row in connection.execute(
                     """SELECT source_signature, url, title, source_subject FROM listings
-                       WHERE is_read = 0 ORDER BY created_at, url LIMIT ?""",
+                       WHERE is_read = 0 ORDER BY source_signature, url LIMIT ?""",
                     (limit,),
                 ).fetchall()
             ]
@@ -268,6 +274,9 @@ class ResolvedListingDatabase:
             read_at TEXT,
             PRIMARY KEY (source_signature, source_url, resolved_url)
         );
+        -- Queue reads first filter unread work, then use the resolved listing ID.
+        CREATE INDEX IF NOT EXISTS resolved_listings_unread_source_url_idx
+            ON resolved_listings (is_read, source_signature, source_url, resolved_url);
     """
 
     def __init__(self, database_path: str | Path) -> None:
@@ -292,7 +301,7 @@ class ResolvedListingDatabase:
                 for row in connection.execute(
                     """SELECT source_signature, source_url, resolved_url, title, source_subject
                        FROM resolved_listings WHERE is_read = 0
-                       ORDER BY created_at, resolved_url LIMIT ?""",
+                       ORDER BY source_signature, source_url, resolved_url LIMIT ?""",
                     (limit,),
                 ).fetchall()
             ]
