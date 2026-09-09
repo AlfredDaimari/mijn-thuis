@@ -69,6 +69,10 @@ Docker secret) and must configure its database as:
 database: "/app/data/pipeline.sqlite3"
 ```
 
+The application worker additionally mounts ignored `accounts.yaml`. Copy
+`query/accounts.yaml-template` and include only provider accounts you own. The
+credentials never leave Playwright and are never sent to Gemini.
+
 All four services share the `house-query-service` image and differ only by
 command. Split an application worker into a separate image only when its
 dependencies or release cadence genuinely diverge; image count is not a
@@ -140,9 +144,15 @@ The worker must use this sequence:
    do not silently discard the item.
 
 The worker stops at `awaiting_review` before an irreversible provider
-submission. The frontend/API can expose the screenshot and an explicit human
-approval action. Automatic submission can be added only as a separately
-reviewed capability with provider-specific safeguards.
+submission. It uses a predefined provider Playwright flow when one is
+registered. Otherwise, generic Dutch/English matching runs first and only a
+failure can trigger Gemini 2.5 Flash. Gemini receives the failure reason and
+redacted visible controls, and can request one validated step at a time (up to
+three per URL). A Gemini-requested provider login uses an exact-host credential
+from ignored `accounts.yaml`; a missing entry is stored in `applications.error`.
+The frontend/API can expose the screenshot and an explicit human approval
+action. Automatic submission can be added only as a separately reviewed
+capability with provider-specific safeguards.
 
 ## Scaling and recovery
 

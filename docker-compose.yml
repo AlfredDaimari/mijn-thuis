@@ -42,6 +42,10 @@ services:
         source: ${QUERY_VALUES_FILE:-./query/values.yaml}
         target: /app/values.yaml
         read_only: true
+      - type: bind
+        source: ${QUERY_ACCOUNTS_FILE:-./query/accounts.yaml}
+        target: /app/accounts.yaml
+        read_only: true
 
 volumes:
   house-query-data:

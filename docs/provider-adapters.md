@@ -10,7 +10,7 @@ how other providers work.
 The generic strategy is the first attempt. It matches visible fields using
 Dutch identifiers first (`voornaam`, `achternaam`, `telefoon`, `e-mail`,
 `bericht`, `naam`) and then English identifiers. If no usable form is visible,
-the optional GPT-5.6 Luna fallback receives the deterministic failure reason
+the optional Gemini 2.5 Flash fallback receives the deterministic failure reason
 and a redacted, numbered list of visible navigation controls. It can only
 suggest a small set of clicks; Playwright re-validates each suggestion. It
 never receives applicant values, cookies, passwords, or full page HTML, and it
@@ -47,6 +47,18 @@ receive a Playwright page and applicant profile, then return structured
 results: fields filled, screenshot paths, and a failure reason when relevant.
 It must not open SQLite connections or execute SQL.
 
+Register the flow before the generic/LLM path:
+
+```python
+from query_service.provider_adapters import register_flow
+
+register_flow("www.example-provider.nl", fill_example_provider)
+```
+
+`fill_example_provider(page, applicant, credentials)` receives a provider
+credential object or `None` and returns the names of profile fields filled.
+When a flow is registered, Gemini is not called for that hostname.
+
 ## Safe implementation procedure
 
 1. Inspect representative resolved URLs for one host and confirm the tally
@@ -71,11 +83,12 @@ It must not open SQLite connections or execute SQL.
 ## Failure handling
 
 If a form is absent, hidden, gated by login, inside an unsupported iframe, or
-protected by CAPTCHA, return a clear failure reason. When the Luna fallback is
+protected by CAPTCHA, return a clear failure reason. When the Gemini fallback is
 attempted, concatenate its planning or execution failure with that original
-generic reason and store it in `applications.error`. Do not bypass access
-controls or CAPTCHA. Leave the record observable for a future site-specific
-adapter or manual workflow.
+generic reason and store it in `applications.error`. If Gemini says login is
+required but the hostname has no `accounts.yaml` entry, persist that error and
+do not register an account, guess a password, or bypass access controls. Leave
+the record observable for a future site-specific adapter or manual workflow.
 
 ## Agent checklist
 
