@@ -65,8 +65,22 @@ class SQLiteDatabase:
         raise RuntimeError("SQLite retry loop ended unexpectedly")
 
     def _initialize(self) -> None:
+        # SQLite cannot switch an existing database into WAL mode from inside
+        # ``BEGIN IMMEDIATE``. Set the journal mode first, then use the normal
+        # short write transaction for schema creation and migrations.
+        for attempt in range(_LOCK_RETRIES):
+            connection = self._connect()
+            try:
+                connection.execute("PRAGMA journal_mode = WAL")
+                break
+            except sqlite3.OperationalError as error:
+                if not self._is_locked(error) or attempt == _LOCK_RETRIES - 1:
+                    raise
+                time.sleep(0.02 * (2**attempt))
+            finally:
+                connection.close()
+
         def create_schema(connection: sqlite3.Connection) -> None:
-            connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(self._schema)
             if self._migrate:
                 self._migrate(connection)
@@ -109,6 +123,16 @@ def _migrate_seen_emails(connection: sqlite3.Connection) -> None:
         WHERE raw_message IS NULL AND is_read = 0
         """
     )
+    resolved_columns = {row[1] for row in connection.execute("PRAGMA table_info(resolved_listings)")}
+    for name, definition in {
+        "id": "INTEGER",
+        "before_fill_screenshot_key": "TEXT",
+        "after_fill_screenshot_key": "TEXT",
+    }.items():
+        if name not in resolved_columns:
+            connection.execute(f"ALTER TABLE resolved_listings ADD COLUMN {name} {definition}")
+    connection.execute("UPDATE resolved_listings SET id = rowid WHERE id IS NULL")
+    connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS resolved_listings_id_idx ON resolved_listings (id)")
 
 
 class EmailDatabase:
@@ -260,6 +284,12 @@ class ResolvedListing:
 
 
 @dataclass(frozen=True)
+class ResolvedCandidate:
+    id: int
+    resolved_url: str
+
+
+@dataclass(frozen=True)
 class ApplicationWork:
     """A leased provider-listing visit that awaits human review after capture."""
 
@@ -298,8 +328,8 @@ class ResolvedListingDatabase:
         def insert(connection: sqlite3.Connection) -> bool:
             cursor = connection.execute(
                 """INSERT OR IGNORE INTO resolved_listings
-                   (source_signature, source_url, resolved_url, title, source_subject, is_read)
-                   VALUES (?, ?, ?, ?, ?, 0)""",
+                   (id, source_signature, source_url, resolved_url, title, source_subject, is_read)
+                   VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM resolved_listings), ?, ?, ?, ?, ?, 0)""",
                 (listing.source_signature, listing.url, resolved_url, listing.title, listing.source_subject),
             )
             return cursor.rowcount == 1
@@ -512,6 +542,17 @@ class PipelineDatabase:
                 ).fetchall()
             ]
         )
+
+    def resolved_candidates_for_form_test(self, limit: int = 7) -> list[ResolvedCandidate]:
+        return self._database.read(lambda connection: [ResolvedCandidate(*row) for row in connection.execute(
+            "SELECT id, resolved_url FROM resolved_listings ORDER BY id LIMIT ?", (limit,)
+        ).fetchall()])
+
+    def record_form_test_evidence(self, resolved_id: int, before: str | None, after: str | None) -> None:
+        self._database.write(lambda connection: connection.execute(
+            "UPDATE resolved_listings SET before_fill_screenshot_key = ?, after_fill_screenshot_key = ? WHERE id = ?",
+            (before, after, resolved_id),
+        ))
 
     def clear_derived_queues_for_test_replay(self) -> None:
         """Clear disposable output queues while preserving captured raw emails."""
