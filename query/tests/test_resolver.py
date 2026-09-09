@@ -2,7 +2,7 @@
 
 import pytest
 
-from query_service.database import ListingDatabase, ResolvedListingDatabase
+from query_service.database import PipelineDatabase
 from query_service.resolver import parse_cookie_header, resolve_once
 
 
@@ -107,21 +107,20 @@ def test_cookie_parser_builds_stekkies_browser_context_cookie() -> None:
 @pytest.mark.resolver
 def test_resolver_persists_external_url_before_marking_source_read(tmp_path) -> None:
     """A successful browser visit writes the durable output then advances input."""
-    listings = ListingDatabase(tmp_path / "listings.sqlite3")
-    resolved = ResolvedListingDatabase(tmp_path / "resolved.sqlite3")
-    listings.add_if_new(
+    database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
+    database.add_listing_if_new(
         "email-1", "https://email.stekkies.com/e/c/42", "Go to listing", "Listings"
     )
     fake = FakePlaywright()
 
     count = resolve_once(
-        listings, resolved, "session=abc", sleeper=lambda _seconds: None,
+        database, "session=abc", sleeper=lambda _seconds: None,
         playwright_factory=lambda: fake,
     )
 
     assert count == 1
-    assert listings.unread_listings() == []
-    queued = resolved.unread_listings()
+    assert database.unread_listings() == []
+    queued = database.unread_resolved_listings()
     assert len(queued) == 1
     assert queued[0].resolved_url == "https://provider.example/listings/42"
     assert fake.context.cookies[0]["name"] == "session"
@@ -130,21 +129,20 @@ def test_resolver_persists_external_url_before_marking_source_read(tmp_path) -> 
 @pytest.mark.resolver
 def test_resolver_logs_context_and_retries_when_click_fails(caplog, tmp_path) -> None:
     """An expired browser session logs diagnostics and leaves the listing unread."""
-    listings = ListingDatabase(tmp_path / "listings.sqlite3")
-    resolved = ResolvedListingDatabase(tmp_path / "resolved.sqlite3")
-    listings.add_if_new(
+    database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
+    database.add_listing_if_new(
         "email-1", "https://email.stekkies.com/e/c/42", "View match", "Listings"
     )
 
     with caplog.at_level("ERROR"):
         count = resolve_once(
-            listings, resolved, "session=abc", sleeper=lambda _seconds: None,
+            database, "session=abc", sleeper=lambda _seconds: None,
             playwright_factory=lambda: FakePlaywright(RuntimeError("expired session")),
         )
 
     assert count == 0
-    assert len(listings.unread_listings()) == 1
-    assert resolved.unread_listings() == []
+    assert len(database.unread_listings()) == 1
+    assert database.unread_resolved_listings() == []
     assert "leaving it unread for retry" in caplog.text
     assert "step=locating Go to listing action" in caplog.text
     assert "current_url=https://www.stekkies.com/e/c/42" in caplog.text

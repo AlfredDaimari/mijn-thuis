@@ -4,7 +4,7 @@ from email.message import EmailMessage
 
 import pytest
 
-from query_service.database import EmailDatabase
+from query_service.database import PipelineDatabase
 from query_service.service import StekkiesQueryService
 from query_service.yahoo import YahooMailbox, parse_listing_email
 
@@ -86,7 +86,7 @@ def test_poller_queues_a_new_email_without_changing_yahoo_read_state(tmp_path) -
     ]
     fake_imap = FakeImap(raw_messages)
     mailbox = YahooMailbox("person@yahoo.com", "app-password", client=fake_imap)
-    database = EmailDatabase(tmp_path / "seen.sqlite3")
+    database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
     service = StekkiesQueryService(mailbox, database)
 
     first_poll = service.poll_once()
@@ -114,7 +114,7 @@ def test_poller_queues_stekkies_email_without_listing_for_observable_processing(
         ]
     )
     mailbox = YahooMailbox("person@yahoo.com", "app-password", client=fake_imap)
-    database = EmailDatabase(tmp_path / "seen.sqlite3")
+    database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
     service = StekkiesQueryService(mailbox, database)
 
     assert len(service.poll_once()) == 1

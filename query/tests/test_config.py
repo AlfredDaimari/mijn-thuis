@@ -28,16 +28,14 @@ def test_load_settings_explains_when_password_is_missing(tmp_path) -> None:
         load_settings(values)
 
 
-def test_load_settings_keeps_configured_database_paths(tmp_path) -> None:
-    """Operators may keep queue databases outside the default data directory."""
+def test_load_settings_keeps_configured_pipeline_database_path(tmp_path) -> None:
+    """Operators may keep the one pipeline database outside the data directory."""
     values = tmp_path / "values.yaml"
     values.write_text(
         "email: person@yahoo.com\npassword: app-password\n"
-        "staging_database: state/staging.sqlite3\n"
-        "listings_database: state/listings.sqlite3\n"
+        "database: state/pipeline.sqlite3\n"
     )
 
     settings = load_settings(values)
 
-    assert settings.staging_database == "state/staging.sqlite3"
-    assert settings.listings_database == "state/listings.sqlite3"
+    assert settings.database == "state/pipeline.sqlite3"

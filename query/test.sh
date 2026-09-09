@@ -2,23 +2,27 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STAGING_DATABASE="$SCRIPT_DIR/data/test.sqlite3"
-LISTINGS_DATABASE="$SCRIPT_DIR/data/test-listings.sqlite3"
+DATABASE="$SCRIPT_DIR/data/test.sqlite3"
 
 cd "$SCRIPT_DIR"
 python3 -m pytest -m "not integration" -vv
 
-if [[ ! -f "$STAGING_DATABASE" ]]; then
-  echo "Missing $STAGING_DATABASE. Run the opt-in live-flow test once to seed it." >&2
+if [[ ! -f "$DATABASE" ]]; then
+  echo "Missing $DATABASE. Run the opt-in live-flow test once to seed it." >&2
   exit 1
 fi
 
-# Preserve the copied email in the staging database. Delete only the separate
-# test listings database from an earlier replay, then requeue the stored email.
-rm -f "$LISTINGS_DATABASE"
-sqlite3 "$STAGING_DATABASE" "UPDATE seen_emails SET is_read = 0, read_at = NULL, extraction_error = NULL;"
+# Preserve the copied email records. Clear only derived queues, then requeue
+# the captured emails through the database layer.
+python3 -c '
+import sys
+from query_service.database import PipelineDatabase
+
+database = PipelineDatabase(sys.argv[1])
+database.clear_derived_queues_for_test_replay()
+database.requeue_all_emails_for_test_replay()
+' "$DATABASE"
 
 python3 -m query_service.processor \
-  --staging-database "$STAGING_DATABASE" \
-  --listings-database "$LISTINGS_DATABASE" \
+  --database "$DATABASE" \
   --once

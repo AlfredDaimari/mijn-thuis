@@ -7,22 +7,23 @@ import sqlite3
 
 import pytest
 
-from query_service.database import EmailDatabase, ListingDatabase, ResolvedListingDatabase
+from query_service.database import PipelineDatabase
 
 
 pytestmark = pytest.mark.database
 
 
-def test_queue_indexes_filter_unread_before_each_stable_record_id(tmp_path) -> None:
-    """Every queue lookup has an index matching its unread-first read order."""
-    paths_and_indexes = (
-        (tmp_path / "staging.sqlite3", EmailDatabase, "seen_emails_unread_signature_idx", ("is_read", "signature")),
-        (tmp_path / "listings.sqlite3", ListingDatabase, "listings_unread_source_url_idx", ("is_read", "source_signature", "url")),
-        (tmp_path / "resolved.sqlite3", ResolvedListingDatabase, "resolved_listings_unread_source_url_idx", ("is_read", "source_signature", "source_url", "resolved_url")),
+def test_single_pipeline_database_indexes_each_unread_queue(tmp_path) -> None:
+    """One file contains every unread-first queue index in the pipeline."""
+    path = tmp_path / "pipeline.sqlite3"
+    PipelineDatabase(path)
+    indexes = (
+        ("seen_emails_unread_signature_idx", ("is_read", "signature")),
+        ("listings_unread_source_url_idx", ("is_read", "source_signature", "url")),
+        ("resolved_listings_unread_source_url_idx", ("is_read", "source_signature", "source_url", "resolved_url")),
     )
 
-    for path, database_type, index_name, expected_columns in paths_and_indexes:
-        database_type(path)
+    for index_name, expected_columns in indexes:
         with sqlite3.connect(path) as connection:
             columns = tuple(row[2] for row in connection.execute(f"PRAGMA index_info({index_name})"))
         assert columns == expected_columns
@@ -30,7 +31,7 @@ def test_queue_indexes_filter_unread_before_each_stable_record_id(tmp_path) -> N
 
 def test_concurrent_duplicate_inserts_create_exactly_one_email(tmp_path) -> None:
     """Concurrent pollers keep one raw-email queue item for one signature."""
-    database = EmailDatabase(tmp_path / "staging.sqlite3")
+    database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
 
     def insert() -> bool:
         return database.remember_if_new(
@@ -47,7 +48,7 @@ def test_concurrent_duplicate_inserts_create_exactly_one_email(tmp_path) -> None
 
 def test_poller_writes_while_processor_reads_without_losing_emails(tmp_path) -> None:
     """WAL lets one poller write while one processor drains the same queue."""
-    database = EmailDatabase(tmp_path / "staging.sqlite3")
+    database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
     start = threading.Event()
     writer_finished = threading.Event()
     errors: list[BaseException] = []
@@ -72,7 +73,7 @@ def test_poller_writes_while_processor_reads_without_losing_emails(tmp_path) -> 
             start.wait()
             while not writer_finished.is_set() or database.unread_emails():
                 for email in database.unread_emails(limit=10):
-                    database.mark_read(email.signature)
+                    database.mark_email_read(email.signature)
                     handled.add(email.signature)
                 time.sleep(0.001)
         except BaseException as error:  # surface worker failures in the test
