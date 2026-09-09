@@ -5,6 +5,20 @@ password: "your-yahoo-app-password"
 # One SQLite database containing the email, listings, and resolved-listings queues.
 database: "data/pipeline.sqlite3"
 
+# Used only by the provider-form worker. Keep the real values in the ignored
+# values.yaml file. The worker must run with --dry-run until form filling has
+# been validated against live provider pages.
+applicant:
+  first_name: "Your first name"
+  last_name: "Your last name"
+  phone: "+31..."
+  email: "you@example.com"
+  message: "Hello, I am interested in this property."
+
+# Optional fallback for unsupported form field identifiers. This is a secret;
+# do not commit it. It is not sent unless deterministic form matching fails.
+openai_api_key: ""
+
 # Copy the complete Cookie request-header value from a browser session already
 # logged into Stekkies. This is an authentication secret, like a password.
 stekkies_cookie: "cookie_name=cookie_value; another_cookie=value"
