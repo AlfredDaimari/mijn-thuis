@@ -6,7 +6,7 @@ Copy `terraform/terraform.tfvars-example` to `terraform/terraform.tfvars`, fill 
 
 The actual `terraform.tfvars` is intentionally Git-ignored. No Terraform commands have been run by this project setup.
 
-To install Docker, edit `ansible/inventory.ini`, make the runner executable once with `chmod +x ansible/run-playbook.sh`, and run it from the `ansible` directory. The script installs Ansible on a Debian/Ubuntu control machine if needed. The playbook always refreshes APT metadata, upgrades packages, installs `docker.io`, enables Docker, and adds the SSH user to the `docker` group.
+To install Docker, edit `ansible/inventory.ini`, make the runner executable once with `chmod +x ansible/run-playbook.sh`, and run it from the `ansible` directory. The script creates or reuses `ansible/.venv` and installs the pinned Ansible requirement only inside that project virtual environment—never with `apt` on the control machine. The playbook always refreshes APT metadata, upgrades packages, installs `docker.io`, enables Docker, and adds the SSH user to the `docker` group.
 
 ## Yahoo Stekkies query service
 
