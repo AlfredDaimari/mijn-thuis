@@ -5,6 +5,7 @@ ansible/.venv/
 *.tfstate.*
 terraform/terraform.tfvars
 query/values.yaml
+query/accounts.yaml
 query/data/
 
 # Python bytecode and test-run artifacts

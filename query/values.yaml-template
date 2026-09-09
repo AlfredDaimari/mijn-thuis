@@ -15,12 +15,12 @@ applicant:
   email: "you@example.com"
   message: "Hello, I am interested in this property."
 
-# Optional fallback for unsupported form field identifiers. This is a secret;
+# Optional Gemini fallback for unsupported form navigation. This is a secret;
 # do not commit it. It is not sent unless deterministic form matching fails.
-# Luna only receives the deterministic failure reason and redacted visible
+# Gemini only receives the deterministic failure reason and redacted visible
 # navigation controls; it never receives applicant values, cookies, or passwords.
-openai_api_key: ""
-luna_model: "gpt-5.6-luna"
+gemini_api_key: ""
+gemini_model: "gemini-2.5-flash"
 
 # Copy the complete Cookie request-header value from a browser session already
 # logged into Stekkies. This is an authentication secret, like a password.

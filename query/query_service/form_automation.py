@@ -1,11 +1,11 @@
-"""No-submit generic form matching and safe Luna-directed navigation."""
+"""No-submit generic form matching and safe Gemini-directed navigation."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from .config import ApplicantProfile
-from .luna_form_planner import NavigationPlan
+from .config import AccountCredentials, ApplicantProfile
+from .gemini_form_planner import NavigationPlan
 
 
 class FormAutomationError(RuntimeError):
@@ -94,25 +94,46 @@ def fill_generic_form(page: Any, profile: ApplicantProfile) -> list[str]:
 
 
 def apply_navigation_plan(page: Any, plan: NavigationPlan) -> int:
-    """Execute only allow-listed navigation clicks; submission is impossible here."""
+    """Execute one allow-listed navigation click; submission is impossible here."""
     controls = page.locator("button, a, [role=button]")
     clicked = 0
     for action in plan.actions:
+        if action.action != "click":
+            raise FormAutomationError("Gemini requested a non-navigation action")
         if action.candidate_index < 0 or action.candidate_index >= controls.count():
-            raise FormAutomationError(f"Luna chose unavailable control index {action.candidate_index}")
+            raise FormAutomationError(f"Gemini chose unavailable control index {action.candidate_index}")
         control = controls.nth(action.candidate_index)
         if not control.is_visible():
-            raise FormAutomationError(f"Luna chose hidden control index {action.candidate_index}")
+            raise FormAutomationError(f"Gemini chose hidden control index {action.candidate_index}")
         text = " ".join(
             filter(None, [control.inner_text(), control.get_attribute("aria-label") or ""])
         ).lower()
         if any(word in text for word in _UNSAFE_NAVIGATION_WORDS):
-            raise FormAutomationError("Luna chose a prohibited navigation control")
+            raise FormAutomationError("Gemini chose a prohibited navigation control")
         if not any(word in text for word in _SAFE_NAVIGATION_WORDS):
-            raise FormAutomationError("Luna chose a control that is not contact/application navigation")
+            raise FormAutomationError("Gemini chose a control that is not contact/application navigation")
         control.click(timeout=10_000)
         page.wait_for_load_state("domcontentloaded", timeout=10_000)
         clicked += 1
     if not clicked:
-        raise FormAutomationError(f"Luna found no safe navigation action: {plan.reason}")
+        raise FormAutomationError(f"Gemini found no safe navigation action: {plan.reason}")
     return clicked
+
+
+def login_to_provider(page: Any, credentials: AccountCredentials) -> None:
+    """Fill a conventional provider login form and submit only that login request."""
+    username = page.locator("input[type=email], input[name*=email i], input[name*=user i]").first
+    password = page.locator("input[type=password]").first
+    if not username.is_visible() or not password.is_visible():
+        raise FormAutomationError(
+            "provider login was requested but no visible username/password fields were found"
+        )
+    username.fill(credentials.username)
+    password.fill(credentials.password)
+    submit = page.locator("button[type=submit], input[type=submit]").first
+    if not submit.is_visible():
+        raise FormAutomationError(
+            "provider login was requested but no visible login submit control was found"
+        )
+    submit.click(timeout=10_000)
+    page.wait_for_load_state("domcontentloaded", timeout=10_000)

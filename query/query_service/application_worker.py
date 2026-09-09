@@ -1,6 +1,6 @@
-"""No-submit provider form worker with a constrained Luna fallback.
+"""No-submit provider form worker with a constrained Gemini fallback.
 
-The worker may fill known contact fields and use a reviewed, allow-listed Luna
+The worker may fill known contact fields and use a reviewed, allow-listed Gemini
 navigation suggestion to reveal a form. It never accepts consent or submits a
 provider application.
 """
@@ -12,15 +12,24 @@ import hashlib
 import logging
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .__main__ import DEFAULT_POLL_SECONDS, configure_logging
-from .config import ApplicantProfile, load_settings
+from .config import AccountCredentials, ApplicantProfile, load_accounts, load_settings
 from .database import ApplicationWork, PipelineDatabase
-from .form_automation import FormAutomationError, apply_navigation_plan, fill_generic_form, visible_navigation_candidates
-from .luna_form_planner import LunaFormPlanner, LunaPlanningError
+from .form_automation import (
+    FormAutomationError,
+    apply_navigation_plan,
+    fill_generic_form,
+    login_to_provider,
+    visible_navigation_candidates,
+)
+from .gemini_form_planner import GeminiFormPlanner, GeminiPlanningError
+from .provider_adapters import flow_for
 
 
 DEFAULT_TIMEOUT_MS = 30_000
+MAX_GEMINI_STEPS = 3
 
 
 def _screenshot_key(work: ApplicationWork) -> str:
@@ -61,9 +70,10 @@ def _fill_for_review(
     work: ApplicationWork,
     screenshot_directory: Path,
     profile: ApplicantProfile,
-    planner: LunaFormPlanner,
+    planner: GeminiFormPlanner,
+    accounts: dict[str, AccountCredentials],
 ) -> tuple[str, list[str], str | None]:
-    """Fill recognised fields, asking Luna only to reveal an absent form.
+    """Fill recognised fields, asking Gemini only after generic matching fails.
 
     The planner is deliberately not given applicant values. Its click plan is
     validated again before Playwright can execute it.
@@ -80,34 +90,62 @@ def _fill_for_review(
     screenshot_key = _screenshot_key(work)
     screenshot_path = screenshot_directory / screenshot_key
     temporary_path = screenshot_directory / f".{screenshot_key}.tmp.png"
-    luna_reason: str | None = None
+    gemini_reasons: list[str] = []
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         context = browser.new_context()
         page = context.new_page()
         try:
             page.goto(work.resolved_url, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
-            try:
-                filled = fill_generic_form(page, profile)
-            except FormAutomationError as generic_error:
-                generic_reason = str(generic_error)
-                try:
-                    plan = planner.plan(
-                        work.resolved_url,
-                        generic_reason,
-                        visible_navigation_candidates(page),
-                    )
-                    apply_navigation_plan(page, plan)
-                    filled = fill_generic_form(page, profile)
-                    luna_reason = plan.reason
-                except (LunaPlanningError, FormAutomationError) as luna_error:
-                    raise FormAutomationError(
-                        f"generic form matching failed: {generic_reason}; "
-                        f"Luna fallback failed: {luna_error}"
-                    ) from luna_error
+            provider_flow = flow_for(work.resolved_url)
+            if provider_flow is not None:
+                host = (urlparse(page.url).hostname or "").lower()
+                credentials = accounts.get(host) or accounts.get(host.removeprefix("www."))
+                filled = provider_flow(page, profile, credentials)
+                gemini_reasons.append("provider-specific Playwright flow")
+            else:
+                for step in range(MAX_GEMINI_STEPS + 1):
+                    try:
+                        filled = fill_generic_form(page, profile)
+                        break
+                    except FormAutomationError as generic_error:
+                        generic_reason = str(generic_error)
+                    if step == MAX_GEMINI_STEPS:
+                        raise FormAutomationError(
+                            f"generic form matching failed: {generic_reason}; "
+                            f"Gemini fallback exhausted after {MAX_GEMINI_STEPS} steps"
+                        )
+                    try:
+                        plan = planner.plan(
+                            work.resolved_url,
+                            generic_reason,
+                            visible_navigation_candidates(page),
+                        )
+                        if not plan.actions:
+                            raise FormAutomationError(
+                                f"Gemini found no safe navigation action: {plan.reason}"
+                            )
+                        action = plan.actions[0]
+                        if action.action == "login":
+                            host = (urlparse(page.url).hostname or "").lower()
+                            credentials = accounts.get(host) or accounts.get(host.removeprefix("www."))
+                            if credentials is None:
+                                raise FormAutomationError(
+                                    f"Gemini identified a required provider login, but no credentials "
+                                    f"exist in accounts.yaml for {host or 'the current provider'}"
+                                )
+                            login_to_provider(page, credentials)
+                        else:
+                            apply_navigation_plan(page, plan)
+                        gemini_reasons.append(plan.reason)
+                    except (GeminiPlanningError, FormAutomationError) as gemini_error:
+                        raise FormAutomationError(
+                            f"generic form matching failed: {generic_reason}; "
+                            f"Gemini fallback failed: {gemini_error}"
+                        ) from gemini_error
             page.screenshot(path=str(temporary_path), full_page=True)
             temporary_path.replace(screenshot_path)
-            return screenshot_key, filled, luna_reason
+            return screenshot_key, filled, "; ".join(gemini_reasons) or None
         finally:
             page.close()
             context.close()
@@ -119,7 +157,8 @@ def process_once(
     screenshot_directory: Path,
     *,
     profile: ApplicantProfile | None = None,
-    planner: LunaFormPlanner | None = None,
+    planner: GeminiFormPlanner | None = None,
+    accounts: dict[str, AccountCredentials] | None = None,
     lease_seconds: int = 1_800,
     max_attempts: int = 3,
 ) -> int:
@@ -133,19 +172,19 @@ def process_once(
         if profile is None:
             screenshot_key = _capture_for_review(work, screenshot_directory)
             fields: list[str] = []
-            luna_reason = None
+            gemini_reason = None
         else:
             if planner is None:
-                raise RuntimeError("Luna planner was not configured for form processing")
-            screenshot_key, fields, luna_reason = _fill_for_review(
-                work, screenshot_directory, profile, planner
+                raise RuntimeError("Gemini planner was not configured for form processing")
+            screenshot_key, fields, gemini_reason = _fill_for_review(
+                work, screenshot_directory, profile, planner, accounts or {}
             )
         database.mark_application_awaiting_review(work, screenshot_key)
         logging.info(
             "Provider listing ready for review | title=%r | provider_url=%s | screenshot=%s "
-            "| fields=%s | luna_navigation_reason=%r",
+            "| fields=%s | gemini_navigation_reasons=%r",
             work.title or "(no title)", work.resolved_url, screenshot_key,
-            ",".join(fields) or "none", luna_reason,
+            ",".join(fields) or "none", gemini_reason,
         )
         return 1
     except Exception as error:
@@ -162,6 +201,11 @@ def main() -> int:
     configure_logging()
     parser = argparse.ArgumentParser(description="Fill provider forms without submitting them")
     parser.add_argument("--config", default="values.yaml")
+    parser.add_argument(
+        "--accounts",
+        default=None,
+        help="Ignored provider-login accounts.yaml; defaults beside --config",
+    )
     parser.add_argument("--database", default=None)
     parser.add_argument("--screenshots-dir", default="/app/screenshots")
     parser.add_argument("--lease-seconds", type=int, default=1_800)
@@ -179,7 +223,9 @@ def main() -> int:
     settings = load_settings(args.config)
     database = PipelineDatabase(args.database or settings.database)
     screenshot_directory = Path(args.screenshots_dir)
-    planner = LunaFormPlanner(settings.openai_api_key, settings.luna_model)
+    accounts_path = Path(args.accounts) if args.accounts else Path(args.config).with_name("accounts.yaml")
+    accounts = load_accounts(accounts_path)
+    planner = GeminiFormPlanner(settings.gemini_api_key, settings.gemini_model)
     try:
         while True:
             handled = process_once(
@@ -187,6 +233,7 @@ def main() -> int:
                 screenshot_directory,
                 profile=settings.applicant,
                 planner=planner,
+                accounts=accounts,
                 lease_seconds=args.lease_seconds,
                 max_attempts=args.max_attempts,
             )

@@ -1,0 +1,7 @@
+# Copy to accounts.yaml. It is Git-ignored and mounted only into the applier.
+# Use the exact hostname logged by the application worker. These values are
+# never sent to Gemini or written to application errors.
+accounts:
+  "provider.example":
+    username: "your-provider-email@example.com"
+    password: "your-provider-password"

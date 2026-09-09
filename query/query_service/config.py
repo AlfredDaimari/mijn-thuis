@@ -13,8 +13,8 @@ class Settings:
     database: str = "data/pipeline.sqlite3"
     stekkies_cookie: str | None = None
     applicant: "ApplicantProfile | None" = None
-    openai_api_key: str | None = None
-    luna_model: str = "gpt-5.6-luna"
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-2.5-flash"
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,14 @@ class ApplicantProfile:
     phone: str
     email: str
     message: str
+
+
+@dataclass(frozen=True)
+class AccountCredentials:
+    """Per-provider credentials used only for a provider login page."""
+
+    username: str
+    password: str
 
 
 def load_settings(path: str | Path) -> Settings:
@@ -40,8 +48,8 @@ def load_settings(path: str | Path) -> Settings:
     password = data.get("password")
     database = data.get("database", "data/pipeline.sqlite3")
     stekkies_cookie = data.get("stekkies_cookie")
-    openai_api_key = data.get("openai_api_key")
-    luna_model = data.get("luna_model", "gpt-5.6-luna")
+    gemini_api_key = data.get("gemini_api_key")
+    gemini_model = data.get("gemini_model", "gemini-2.5-flash")
     applicant_data = data.get("applicant")
     if not isinstance(email, str) or not email.strip():
         raise ValueError("values.yaml requires a non-empty email")
@@ -51,12 +59,12 @@ def load_settings(path: str | Path) -> Settings:
         raise ValueError("values.yaml database must be a non-empty path")
     if stekkies_cookie is not None and (not isinstance(stekkies_cookie, str) or not stekkies_cookie.strip()):
         raise ValueError("values.yaml stekkies_cookie must be a non-empty string")
-    if openai_api_key is not None and (
-        not isinstance(openai_api_key, str) or not openai_api_key.strip()
+    if gemini_api_key is not None and (
+        not isinstance(gemini_api_key, str) or not gemini_api_key.strip()
     ):
-        openai_api_key = None
-    if not isinstance(luna_model, str) or not luna_model.strip():
-        raise ValueError("values.yaml luna_model must be a non-empty string")
+        gemini_api_key = None
+    if not isinstance(gemini_model, str) or not gemini_model.strip():
+        raise ValueError("values.yaml gemini_model must be a non-empty string")
 
     applicant = None
     if applicant_data is not None:
@@ -78,6 +86,27 @@ def load_settings(path: str | Path) -> Settings:
         database=database.strip(),
         stekkies_cookie=stekkies_cookie.strip() if stekkies_cookie else None,
         applicant=applicant,
-        openai_api_key=openai_api_key.strip() if openai_api_key else None,
-        luna_model=luna_model.strip(),
+        gemini_api_key=gemini_api_key.strip() if gemini_api_key else None,
+        gemini_model=gemini_model.strip(),
     )
+
+
+def load_accounts(path: str | Path) -> dict[str, AccountCredentials]:
+    """Read ignored per-provider credentials without logging secret values."""
+    account_path = Path(path)
+    if not account_path.exists():
+        return {}
+    with account_path.open("r", encoding="utf-8") as accounts_file:
+        data = yaml.safe_load(accounts_file)
+    if not isinstance(data, dict) or not isinstance(data.get("accounts"), dict):
+        raise ValueError("accounts.yaml must contain an accounts mapping")
+    accounts: dict[str, AccountCredentials] = {}
+    for host, credentials in data["accounts"].items():
+        if not isinstance(host, str) or not host.strip() or not isinstance(credentials, dict):
+            raise ValueError("each accounts.yaml account needs a hostname and credential mapping")
+        username = credentials.get("username")
+        password = credentials.get("password")
+        if not isinstance(username, str) or not username.strip() or not isinstance(password, str) or not password.strip():
+            raise ValueError(f"accounts.yaml requires non-empty username and password for {host}")
+        accounts[host.strip().lower()] = AccountCredentials(username.strip(), password.strip())
+    return accounts

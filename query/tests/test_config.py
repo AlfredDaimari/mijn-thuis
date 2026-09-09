@@ -2,7 +2,7 @@
 
 import pytest
 
-from query_service.config import load_settings
+from query_service.config import load_accounts, load_settings
 
 
 pytestmark = pytest.mark.unit
@@ -41,12 +41,12 @@ def test_load_settings_keeps_configured_pipeline_database_path(tmp_path) -> None
     assert settings.database == "state/pipeline.sqlite3"
 
 
-def test_load_settings_reads_optional_applicant_and_luna_settings(tmp_path) -> None:
+def test_load_settings_reads_optional_applicant_and_gemini_settings(tmp_path) -> None:
     """Form settings stay optional for the mail-only worker but load when supplied."""
     values = tmp_path / "values.yaml"
     values.write_text(
         "email: person@yahoo.com\npassword: app-password\n"
-        "openai_api_key: test-key\nluna_model: gpt-5.6-luna\n"
+        "gemini_api_key: test-key\ngemini_model: gemini-2.5-flash\n"
         "applicant:\n  first_name: Ada\n  last_name: Lovelace\n"
         "  phone: '+31600000000'\n  email: ada@example.com\n  message: Interested\n"
     )
@@ -55,5 +55,18 @@ def test_load_settings_reads_optional_applicant_and_luna_settings(tmp_path) -> N
 
     assert settings.applicant is not None
     assert settings.applicant.first_name == "Ada"
-    assert settings.openai_api_key == "test-key"
-    assert settings.luna_model == "gpt-5.6-luna"
+    assert settings.gemini_api_key == "test-key"
+    assert settings.gemini_model == "gemini-2.5-flash"
+
+
+def test_load_accounts_reads_only_the_configured_provider_credentials(tmp_path) -> None:
+    """Credentials are separate from values.yaml and keyed by provider host."""
+    accounts = tmp_path / "accounts.yaml"
+    accounts.write_text(
+        "accounts:\n  provider.example:\n    username: member@example.com\n"
+        "    password: secret-password\n"
+    )
+
+    loaded = load_accounts(accounts)
+
+    assert loaded["provider.example"].username == "member@example.com"
