@@ -5,8 +5,8 @@ import logging
 import time
 
 from .config import load_settings
+from .database import EmailDatabase
 from .service import StekkiesQueryService
-from .store import SeenEmailStore
 from .yahoo import YahooMailbox
 
 DEFAULT_POLL_SECONDS = 300
@@ -40,9 +40,9 @@ def main() -> int:
         parser.error(f"--poll-seconds must be at least {DEFAULT_POLL_SECONDS}")
 
     settings = load_settings(args.config)
-    store = SeenEmailStore(args.database or settings.staging_database)
+    database = EmailDatabase(args.database or settings.staging_database)
     mailbox = YahooMailbox(settings.email, settings.password)
-    service = StekkiesQueryService(mailbox, store)
+    service = StekkiesQueryService(mailbox, database)
     try:
         while True:
             new_messages = service.poll_once()
@@ -64,7 +64,6 @@ def main() -> int:
         return 1
     finally:
         mailbox.close()
-        store.close()
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ from collections.abc import Callable, MutableMapping
 from urllib.parse import urlparse
 
 from .config import load_settings
-from .store import ListingStore, ResolvedListingStore
+from .database import ListingDatabase, ResolvedListingDatabase
 
 
 DEFAULT_TIMEOUT_MS = 30_000
@@ -133,8 +133,8 @@ def _view_listing(page, source_url: str, attempt: MutableMapping[str, str]):
 
 
 def resolve_once(
-    listings: ListingStore,
-    resolved_listings: ResolvedListingStore,
+    listings_database: ListingDatabase,
+    resolved_database: ResolvedListingDatabase,
     cookie: str,
     sleeper: Callable[[float], None] = time.sleep,
     limit: int = 50,
@@ -151,7 +151,7 @@ def resolve_once(
             ) from error
         playwright_factory = sync_playwright
 
-    queued = listings.unread_listings(limit=limit)
+    queued = listings_database.unread_listings(limit=limit)
     if not queued:
         return 0
 
@@ -171,8 +171,8 @@ def resolve_once(
                             "the View listing control did not leave Stekkies; "
                             "the session cookie may be expired or incomplete"
                         )
-                    resolved_listings.add_if_new(item, destination.url)
-                    listings.mark_read(item.source_signature, item.url)
+                    resolved_database.add_if_new(item, destination.url)
+                    listings_database.mark_read(item.source_signature, item.url)
                     logging.info(
                         "Resolved listing URL | title=%s | source_url=%s | resolved_url=%s",
                         item.title or "(no title)",
@@ -221,17 +221,13 @@ def main() -> int:
     settings = load_settings(args.config)
     if not settings.stekkies_cookie:
         parser.error("values.yaml requires stekkies_cookie")
-    listings = ListingStore(args.listings_database or settings.listings_database)
-    resolved_listings = ResolvedListingStore(args.resolved_database or settings.resolved_database)
-    try:
-        while True:
-            resolve_once(listings, resolved_listings, settings.stekkies_cookie, limit=args.limit)
-            if args.once:
-                return 0
-            time.sleep(300)
-    finally:
-        resolved_listings.close()
-        listings.close()
+    listings_database = ListingDatabase(args.listings_database or settings.listings_database)
+    resolved_database = ResolvedListingDatabase(args.resolved_database or settings.resolved_database)
+    while True:
+        resolve_once(listings_database, resolved_database, settings.stekkies_cookie, limit=args.limit)
+        if args.once:
+            return 0
+        time.sleep(300)
 
 
 if __name__ == "__main__":

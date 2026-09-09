@@ -7,13 +7,13 @@ import time
 from .__main__ import DEFAULT_POLL_SECONDS, configure_logging
 from .config import load_settings
 from .extractor import extract_listings
-from .store import ListingStore, SeenEmailStore
+from .database import EmailDatabase, ListingDatabase
 
 
-def process_once(staging_store: SeenEmailStore, listing_store: ListingStore) -> int:
+def process_once(staging_database: EmailDatabase, listings_database: ListingDatabase) -> int:
     """Process the unread queue in one process; return the number handled."""
     handled = 0
-    for email in staging_store.unread_emails():
+    for email in staging_database.unread_emails():
         listings = extract_listings(email.raw_message)
         if not listings:
             error = "No listing links could be extracted from a Stekkies email"
@@ -23,12 +23,12 @@ def process_once(staging_store: SeenEmailStore, listing_store: ListingStore) -> 
                 email.message_id or "unknown",
                 email.subject or "(no subject)",
             )
-            staging_store.mark_read(email.signature, extraction_error=error)
+            staging_database.mark_read(email.signature, extraction_error=error)
             handled += 1
             continue
 
         for listing in listings:
-            if listing_store.add_if_new(
+            if listings_database.add_if_new(
                 email.signature, listing.url, listing.title, email.subject
             ):
                 logging.info(
@@ -38,7 +38,7 @@ def process_once(staging_store: SeenEmailStore, listing_store: ListingStore) -> 
                     listing.title,
                     listing.url,
                 )
-        staging_store.mark_read(email.signature)
+        staging_database.mark_read(email.signature)
         handled += 1
     return handled
 
@@ -64,11 +64,11 @@ def main() -> int:
         parser.error(f"--poll-seconds must be at least {DEFAULT_POLL_SECONDS}")
 
     settings = load_settings(args.config)
-    staging_store = SeenEmailStore(args.staging_database or settings.staging_database)
-    listing_store = ListingStore(args.listings_database or settings.listings_database)
+    staging_database = EmailDatabase(args.staging_database or settings.staging_database)
+    listings_database = ListingDatabase(args.listings_database or settings.listings_database)
     try:
         while True:
-            handled = process_once(staging_store, listing_store)
+            handled = process_once(staging_database, listings_database)
             logging.info("Stekkies listing processor complete | handled_emails=%d", handled)
             if args.once:
                 return 0
@@ -79,9 +79,6 @@ def main() -> int:
     except Exception:
         logging.exception("Stekkies listing processor failed")
         return 1
-    finally:
-        staging_store.close()
-        listing_store.close()
 
 
 if __name__ == "__main__":

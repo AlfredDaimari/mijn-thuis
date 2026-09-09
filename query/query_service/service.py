@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-from .store import SeenEmailStore
+from .database import EmailDatabase
 from .yahoo import ListingEmail, YahooMailbox
 
 
 class StekkiesQueryService:
-    def __init__(self, mailbox: YahooMailbox, store: SeenEmailStore) -> None:
+    def __init__(self, mailbox: YahooMailbox, database: EmailDatabase) -> None:
         self.mailbox = mailbox
-        self.store = store
+        self.database = database
 
     def poll_once(self) -> list[ListingEmail]:
         """Fetch matching messages and return only ones not previously read."""
         new_messages: list[ListingEmail] = []
         for message in self.mailbox.fetch_stekkies_messages():
-            if self.store.remember_if_new(
+            if self.database.remember_if_new(
                 message.signature,
                 message.message_id,
                 message.sender,
