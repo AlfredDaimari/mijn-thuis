@@ -6,7 +6,7 @@ STAGING_DATABASE="$SCRIPT_DIR/data/test.sqlite3"
 LISTINGS_DATABASE="$SCRIPT_DIR/data/test-listings.sqlite3"
 
 cd "$SCRIPT_DIR"
-python3 -m unittest discover -s tests -v
+python3 -m pytest -m "not integration" -vv
 
 if [[ ! -f "$STAGING_DATABASE" ]]; then
   echo "Missing $STAGING_DATABASE. Run the opt-in live-flow test once to seed it." >&2
