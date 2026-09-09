@@ -126,6 +126,19 @@ def test_resolver_persists_external_url_before_marking_source_read(tmp_path) -> 
     assert fake.context.cookies[0]["name"] == "session"
 
 
+@pytest.mark.database
+def test_resolved_provider_url_is_queued_once_across_source_emails(tmp_path) -> None:
+    """Different Stekkies emails cannot create duplicate provider work."""
+    database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
+    database.add_listing_if_new("email-1", "https://stekkies.test/1", None, "Listings")
+    database.add_listing_if_new("email-2", "https://stekkies.test/2", None, "Listings")
+    first, second = database.unread_listings()
+
+    assert database.add_resolved_listing_and_mark_source_read(first, "https://provider.test/home/42")
+    assert not database.add_resolved_listing_and_mark_source_read(second, "https://provider.test/home/42")
+    assert len(database.unread_resolved_listings()) == 1
+
+
 @pytest.mark.resolver
 def test_resolver_logs_context_and_retries_when_click_fails(caplog, tmp_path) -> None:
     """An expired browser session logs diagnostics and leaves the listing unread."""

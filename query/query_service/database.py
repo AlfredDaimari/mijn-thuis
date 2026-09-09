@@ -124,6 +124,11 @@ def _migrate_seen_emails(connection: sqlite3.Connection) -> None:
         WHERE raw_message IS NULL AND is_read = 0
         """
     )
+    resolved_table_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'resolved_listings'"
+    ).fetchone()
+    if not resolved_table_exists:
+        return
     resolved_columns = {row[1] for row in connection.execute("PRAGMA table_info(resolved_listings)")}
     for name, definition in {
         "id": "INTEGER",
@@ -134,6 +139,7 @@ def _migrate_seen_emails(connection: sqlite3.Connection) -> None:
             connection.execute(f"ALTER TABLE resolved_listings ADD COLUMN {name} {definition}")
     connection.execute("UPDATE resolved_listings SET id = rowid WHERE id IS NULL")
     connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS resolved_listings_id_idx ON resolved_listings (id)")
+    connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS resolved_listings_url_idx ON resolved_listings (resolved_url)")
 
 
 class EmailDatabase:
@@ -323,7 +329,8 @@ class ResolvedListingDatabase:
             is_read INTEGER NOT NULL DEFAULT 0 CHECK (is_read IN (0, 1)),
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             read_at TEXT,
-            PRIMARY KEY (source_signature, source_url, resolved_url)
+            PRIMARY KEY (source_signature, source_url, resolved_url),
+            UNIQUE (resolved_url)
         );
         -- Queue reads first filter unread work, then use the resolved listing ID.
         CREATE INDEX IF NOT EXISTS resolved_listings_unread_source_url_idx
@@ -714,6 +721,24 @@ class PipelineDatabase:
                 if (
                     row := connection.execute(
                         """SELECT status FROM applications
+                           WHERE source_signature = ? AND source_url = ? AND resolved_url = ?""",
+                        (source_signature, source_url, resolved_url),
+                    ).fetchone()
+                )
+                else None
+            )
+        )
+
+    def application_error(
+        self, source_signature: str, source_url: str, resolved_url: str
+    ) -> str | None:
+        """Return the latest safe failure reason recorded by the application worker."""
+        return self._database.read(
+            lambda connection: (
+                row[0]
+                if (
+                    row := connection.execute(
+                        """SELECT error FROM applications
                            WHERE source_signature = ? AND source_url = ? AND resolved_url = ?""",
                         (source_signature, source_url, resolved_url),
                     ).fetchone()
