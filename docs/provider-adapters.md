@@ -7,10 +7,14 @@ pipeline therefore has one generic Playwright form strategy and optional,
 hostname-specific adapters. An adapter improves one provider without changing
 how other providers work.
 
-The generic strategy is the fallback. It matches visible fields using Dutch
-identifiers first (`voornaam`, `achternaam`, `telefoon`, `e-mail`, `bericht`,
-`naam`) and then English identifiers. It must never click submit during a
-dry-run evaluation.
+The generic strategy is the first attempt. It matches visible fields using
+Dutch identifiers first (`voornaam`, `achternaam`, `telefoon`, `e-mail`,
+`bericht`, `naam`) and then English identifiers. If no usable form is visible,
+the optional GPT-5.6 Luna fallback receives the deterministic failure reason
+and a redacted, numbered list of visible navigation controls. It can only
+suggest a small set of clicks; Playwright re-validates each suggestion. It
+never receives applicant values, cookies, passwords, or full page HTML, and it
+must never click submit during a dry-run evaluation.
 
 ## Choosing the next provider
 
@@ -67,7 +71,9 @@ It must not open SQLite connections or execute SQL.
 ## Failure handling
 
 If a form is absent, hidden, gated by login, inside an unsupported iframe, or
-protected by CAPTCHA, return a clear failure reason. Do not bypass access
+protected by CAPTCHA, return a clear failure reason. When the Luna fallback is
+attempted, concatenate its planning or execution failure with that original
+generic reason and store it in `applications.error`. Do not bypass access
 controls or CAPTCHA. Leave the record observable for a future site-specific
 adapter or manual workflow.
 

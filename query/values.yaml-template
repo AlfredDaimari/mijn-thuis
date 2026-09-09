@@ -17,7 +17,10 @@ applicant:
 
 # Optional fallback for unsupported form field identifiers. This is a secret;
 # do not commit it. It is not sent unless deterministic form matching fails.
+# Luna only receives the deterministic failure reason and redacted visible
+# navigation controls; it never receives applicant values, cookies, or passwords.
 openai_api_key: ""
+luna_model: "gpt-5.6-luna"
 
 # Copy the complete Cookie request-header value from a browser session already
 # logged into Stekkies. This is an authentication secret, like a password.
