@@ -2,11 +2,8 @@
 # Yahoo password. Keep this file private; values.yaml is Git-ignored.
 email: "you@yahoo.com"
 password: "your-yahoo-app-password"
-# The poller writes full emails to staging; the processor writes extracted
-# listings to the second database. Both queues have their own is_read state.
-staging_database: "data/staging.sqlite3"
-listings_database: "data/listings.sqlite3"
-resolved_database: "data/resolved.sqlite3"
+# One SQLite file holds the email, listings, and resolved-listings queues.
+database: "data/pipeline.sqlite3"
 # Copy the complete Cookie request-header value from a browser session that is
 # already logged into Stekkies. This is an authentication secret.
 stekkies_cookie: "cookie_name=cookie_value"

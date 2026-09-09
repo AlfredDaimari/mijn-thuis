@@ -5,7 +5,7 @@ import logging
 import time
 
 from .config import load_settings
-from .database import EmailDatabase
+from .database import PipelineDatabase
 from .service import StekkiesQueryService
 from .yahoo import YahooMailbox
 
@@ -26,7 +26,7 @@ def main() -> int:
     parser.add_argument(
         "--database",
         default=None,
-        help="Staging SQLite path; overrides staging_database in values.yaml",
+        help="Pipeline SQLite path; overrides database in values.yaml",
     )
     parser.add_argument("--once", action="store_true", help="Poll once and exit")
     parser.add_argument(
@@ -40,7 +40,7 @@ def main() -> int:
         parser.error(f"--poll-seconds must be at least {DEFAULT_POLL_SECONDS}")
 
     settings = load_settings(args.config)
-    database = EmailDatabase(args.database or settings.staging_database)
+    database = PipelineDatabase(args.database or settings.database)
     mailbox = YahooMailbox(settings.email, settings.password)
     service = StekkiesQueryService(mailbox, database)
     try:

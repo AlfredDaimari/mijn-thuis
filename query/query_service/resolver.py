@@ -8,7 +8,7 @@ from collections.abc import Callable, MutableMapping
 from urllib.parse import urlparse
 
 from .config import load_settings
-from .database import ListingDatabase, ResolvedListingDatabase
+from .database import PipelineDatabase
 
 
 DEFAULT_TIMEOUT_MS = 30_000
@@ -133,8 +133,7 @@ def _view_listing(page, source_url: str, attempt: MutableMapping[str, str]):
 
 
 def resolve_once(
-    listings_database: ListingDatabase,
-    resolved_database: ResolvedListingDatabase,
+    database: PipelineDatabase,
     cookie: str,
     sleeper: Callable[[float], None] = time.sleep,
     limit: int = 50,
@@ -151,7 +150,7 @@ def resolve_once(
             ) from error
         playwright_factory = sync_playwright
 
-    queued = listings_database.unread_listings(limit=limit)
+    queued = database.unread_listings(limit=limit)
     if not queued:
         return 0
 
@@ -171,8 +170,7 @@ def resolve_once(
                             "the View listing control did not leave Stekkies; "
                             "the session cookie may be expired or incomplete"
                         )
-                    resolved_database.add_if_new(item, destination.url)
-                    listings_database.mark_read(item.source_signature, item.url)
+                    database.add_resolved_listing_and_mark_source_read(item, destination.url)
                     logging.info(
                         "Resolved listing URL | title=%s | source_url=%s | resolved_url=%s",
                         item.title or "(no title)",
@@ -213,18 +211,16 @@ def main() -> int:
     configure_logging()
     parser = argparse.ArgumentParser(description="Resolve Stekkies links with local Playwright")
     parser.add_argument("--config", default="values.yaml")
-    parser.add_argument("--listings-database", default=None)
-    parser.add_argument("--resolved-database", default=None)
+    parser.add_argument("--database", default=None)
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     settings = load_settings(args.config)
     if not settings.stekkies_cookie:
         parser.error("values.yaml requires stekkies_cookie")
-    listings_database = ListingDatabase(args.listings_database or settings.listings_database)
-    resolved_database = ResolvedListingDatabase(args.resolved_database or settings.resolved_database)
+    database = PipelineDatabase(args.database or settings.database)
     while True:
-        resolve_once(listings_database, resolved_database, settings.stekkies_cookie, limit=args.limit)
+        resolve_once(database, settings.stekkies_cookie, limit=args.limit)
         if args.once:
             return 0
         time.sleep(300)

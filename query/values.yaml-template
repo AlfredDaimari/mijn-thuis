@@ -2,10 +2,8 @@
 email: "you@yahoo.com"
 password: "your-yahoo-app-password"
 
-# SQLite pipeline databases, all stored locally under query/data/.
-staging_database: "data/staging.sqlite3"
-listings_database: "data/listings.sqlite3"
-resolved_database: "data/resolved.sqlite3"
+# One SQLite database containing the email, listings, and resolved-listings queues.
+database: "data/pipeline.sqlite3"
 
 # Copy the complete Cookie request-header value from a browser session already
 # logged into Stekkies. This is an authentication secret, like a password.

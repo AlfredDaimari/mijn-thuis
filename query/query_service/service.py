@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from .database import EmailDatabase
+from .database import PipelineDatabase
 from .yahoo import ListingEmail, YahooMailbox
 
 
 class StekkiesQueryService:
-    def __init__(self, mailbox: YahooMailbox, database: EmailDatabase) -> None:
+    def __init__(self, mailbox: YahooMailbox, database: PipelineDatabase) -> None:
         self.mailbox = mailbox
         self.database = database
 

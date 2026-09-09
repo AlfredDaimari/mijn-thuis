@@ -315,3 +315,185 @@ class ResolvedListingDatabase:
                 (source_signature, source_url, resolved_url),
             )
         )
+
+
+class PipelineDatabase:
+    """One SQLite database containing all durable pipeline queues.
+
+    Queue handoffs use one write transaction, so an output record and its
+    source's read state change together.  The service modules only call these
+    methods; SQL remains confined to this data-access layer.
+    """
+
+    _SCHEMA = EmailDatabase._SCHEMA + ListingDatabase._SCHEMA + ResolvedListingDatabase._SCHEMA
+
+    def __init__(self, database_path: str | Path) -> None:
+        self._database = SQLiteDatabase(database_path, self._SCHEMA, _migrate_seen_emails)
+
+    def remember_if_new(self, signature: str, message_id: str, sender: str, subject: str, raw_message: bytes) -> bool:
+        def insert(connection: sqlite3.Connection) -> bool:
+            cursor = connection.execute(
+                """INSERT OR IGNORE INTO seen_emails
+                   (signature, message_id, sender, subject, raw_message, is_read)
+                   VALUES (?, ?, ?, ?, ?, 0)""",
+                (signature, message_id, sender, subject, raw_message),
+            )
+            return cursor.rowcount == 1
+
+        return self._database.write(insert)
+
+    def unread_emails(self, limit: int = 50) -> list[PendingEmail]:
+        return self._database.read(
+            lambda connection: [
+                PendingEmail(*row)
+                for row in connection.execute(
+                    """SELECT signature, message_id, sender, subject, raw_message
+                       FROM seen_emails WHERE is_read = 0
+                       ORDER BY signature LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+                if row[4] is not None
+            ]
+        )
+
+    def mark_email_read(self, signature: str, extraction_error: str | None = None) -> None:
+        self._database.write(
+            lambda connection: connection.execute(
+                """UPDATE seen_emails
+                   SET is_read = 1, read_at = CURRENT_TIMESTAMP, extraction_error = ?
+                   WHERE signature = ?""",
+                (extraction_error, signature),
+            )
+        )
+
+    def mark_email_unread(self, signature: str) -> None:
+        self._database.write(
+            lambda connection: connection.execute(
+                """UPDATE seen_emails
+                   SET is_read = 0, read_at = NULL, extraction_error = NULL
+                   WHERE signature = ?""",
+                (signature,),
+            )
+        )
+
+    def add_listings_and_mark_email_read(
+        self, email: PendingEmail, listings: list[tuple[str, str | None]]
+    ) -> list[QueuedListing]:
+        """Atomically queue extracted listings and acknowledge their email."""
+        def write(connection: sqlite3.Connection) -> list[QueuedListing]:
+            added: list[QueuedListing] = []
+            for url, title in listings:
+                cursor = connection.execute(
+                    """INSERT OR IGNORE INTO listings
+                       (source_signature, url, title, source_subject, is_read)
+                       VALUES (?, ?, ?, ?, 0)""",
+                    (email.signature, url, title, email.subject),
+                )
+                if cursor.rowcount == 1:
+                    added.append(QueuedListing(email.signature, url, title, email.subject))
+            connection.execute(
+                """UPDATE seen_emails
+                   SET is_read = 1, read_at = CURRENT_TIMESTAMP, extraction_error = NULL
+                   WHERE signature = ?""",
+                (email.signature,),
+            )
+            return added
+
+        return self._database.write(write)
+
+    def add_listing_if_new(self, source_signature: str, url: str, title: str | None, source_subject: str) -> bool:
+        def insert(connection: sqlite3.Connection) -> bool:
+            cursor = connection.execute(
+                """INSERT OR IGNORE INTO listings
+                   (source_signature, url, title, source_subject, is_read)
+                   VALUES (?, ?, ?, ?, 0)""",
+                (source_signature, url, title, source_subject),
+            )
+            return cursor.rowcount == 1
+
+        return self._database.write(insert)
+
+    def unread_listings(self, limit: int = 50) -> list[QueuedListing]:
+        return self._database.read(
+            lambda connection: [
+                QueuedListing(*row)
+                for row in connection.execute(
+                    """SELECT source_signature, url, title, source_subject FROM listings
+                       WHERE is_read = 0 ORDER BY source_signature, url LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+            ]
+        )
+
+    def mark_listing_read(self, source_signature: str, url: str) -> None:
+        self._set_listing_read(source_signature, url, True)
+
+    def mark_listing_unread(self, source_signature: str, url: str) -> None:
+        self._set_listing_read(source_signature, url, False)
+
+    def _set_listing_read(self, source_signature: str, url: str, is_read: bool) -> None:
+        self._database.write(
+            lambda connection: connection.execute(
+                """UPDATE listings
+                   SET is_read = ?, read_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END
+                   WHERE source_signature = ? AND url = ?""",
+                (int(is_read), int(is_read), source_signature, url),
+            )
+        )
+
+    def add_resolved_listing_and_mark_source_read(self, listing: QueuedListing, resolved_url: str) -> bool:
+        """Atomically persist a resolved URL and acknowledge its source listing."""
+        def write(connection: sqlite3.Connection) -> bool:
+            cursor = connection.execute(
+                """INSERT OR IGNORE INTO resolved_listings
+                   (source_signature, source_url, resolved_url, title, source_subject, is_read)
+                   VALUES (?, ?, ?, ?, ?, 0)""",
+                (listing.source_signature, listing.url, resolved_url, listing.title, listing.source_subject),
+            )
+            connection.execute(
+                """UPDATE listings SET is_read = 1, read_at = CURRENT_TIMESTAMP
+                   WHERE source_signature = ? AND url = ?""",
+                (listing.source_signature, listing.url),
+            )
+            return cursor.rowcount == 1
+
+        return self._database.write(write)
+
+    def unread_resolved_listings(self, limit: int = 50) -> list[ResolvedListing]:
+        return self._database.read(
+            lambda connection: [
+                ResolvedListing(*row)
+                for row in connection.execute(
+                    """SELECT source_signature, source_url, resolved_url, title, source_subject
+                       FROM resolved_listings WHERE is_read = 0
+                       ORDER BY source_signature, source_url, resolved_url LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+            ]
+        )
+
+    def clear_derived_queues_for_test_replay(self) -> None:
+        """Clear disposable output queues while preserving captured raw emails."""
+        self._database.write(
+            lambda connection: connection.executescript(
+                "DELETE FROM resolved_listings; DELETE FROM listings;"
+            )
+        )
+
+    def requeue_all_emails_for_test_replay(self) -> None:
+        """Make saved test emails available again without reinserting them."""
+        self._database.write(
+            lambda connection: connection.execute(
+                """UPDATE seen_emails
+                   SET is_read = 0, read_at = NULL, extraction_error = NULL"""
+            )
+        )
+
+    def mark_resolved_listing_read(self, source_signature: str, source_url: str, resolved_url: str) -> None:
+        self._database.write(
+            lambda connection: connection.execute(
+                """UPDATE resolved_listings SET is_read = 1, read_at = CURRENT_TIMESTAMP
+                   WHERE source_signature = ? AND source_url = ? AND resolved_url = ?""",
+                (source_signature, source_url, resolved_url),
+            )
+        )
