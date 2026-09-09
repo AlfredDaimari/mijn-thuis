@@ -3,13 +3,29 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+import sqlite3
 
 import pytest
 
-from query_service.database import EmailDatabase
+from query_service.database import EmailDatabase, ListingDatabase, ResolvedListingDatabase
 
 
 pytestmark = pytest.mark.database
+
+
+def test_queue_indexes_filter_unread_before_each_stable_record_id(tmp_path) -> None:
+    """Every queue lookup has an index matching its unread-first read order."""
+    paths_and_indexes = (
+        (tmp_path / "staging.sqlite3", EmailDatabase, "seen_emails_unread_signature_idx", ("is_read", "signature")),
+        (tmp_path / "listings.sqlite3", ListingDatabase, "listings_unread_source_url_idx", ("is_read", "source_signature", "url")),
+        (tmp_path / "resolved.sqlite3", ResolvedListingDatabase, "resolved_listings_unread_source_url_idx", ("is_read", "source_signature", "source_url", "resolved_url")),
+    )
+
+    for path, database_type, index_name, expected_columns in paths_and_indexes:
+        database_type(path)
+        with sqlite3.connect(path) as connection:
+            columns = tuple(row[2] for row in connection.execute(f"PRAGMA index_info({index_name})"))
+        assert columns == expected_columns
 
 
 def test_concurrent_duplicate_inserts_create_exactly_one_email(tmp_path) -> None:
