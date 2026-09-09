@@ -259,6 +259,18 @@ class ResolvedListing:
     source_subject: str
 
 
+@dataclass(frozen=True)
+class ApplicationWork:
+    """A leased provider-listing visit that awaits human review after capture."""
+
+    source_signature: str
+    source_url: str
+    resolved_url: str
+    title: str | None
+    source_subject: str
+    attempt_count: int
+
+
 class ResolvedListingDatabase:
     """Data access for resolved provider URLs awaiting their next consumer."""
 
@@ -325,7 +337,36 @@ class PipelineDatabase:
     methods; SQL remains confined to this data-access layer.
     """
 
-    _SCHEMA = EmailDatabase._SCHEMA + ListingDatabase._SCHEMA + ResolvedListingDatabase._SCHEMA
+    _APPLICATION_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS applications (
+            source_signature TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            resolved_url TEXT NOT NULL,
+            title TEXT,
+            source_subject TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN (
+                'pending', 'processing', 'awaiting_review', 'submitted', 'failed'
+            )),
+            lease_expires_at TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            screenshot_key TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            claimed_at TEXT,
+            completed_at TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (source_signature, source_url, resolved_url)
+        );
+        CREATE INDEX IF NOT EXISTS applications_status_lease_idx
+            ON applications (status, lease_expires_at, source_signature, source_url, resolved_url);
+    """
+
+    _SCHEMA = (
+        EmailDatabase._SCHEMA
+        + ListingDatabase._SCHEMA
+        + ResolvedListingDatabase._SCHEMA
+        + _APPLICATION_SCHEMA
+    )
 
     def __init__(self, database_path: str | Path) -> None:
         self._database = SQLiteDatabase(database_path, self._SCHEMA, _migrate_seen_emails)
@@ -495,5 +536,117 @@ class PipelineDatabase:
                 """UPDATE resolved_listings SET is_read = 1, read_at = CURRENT_TIMESTAMP
                    WHERE source_signature = ? AND source_url = ? AND resolved_url = ?""",
                 (source_signature, source_url, resolved_url),
+            )
+        )
+
+    def claim_next_application(
+        self, *, lease_seconds: int = 1_800, max_attempts: int = 3
+    ) -> ApplicationWork | None:
+        """Atomically claim one provider visit and lease it to this worker.
+
+        A newly claimed resolved listing is acknowledged in the same
+        transaction that creates its durable application record. Expired
+        leases become retryable failures before another item is claimed.
+        """
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        if max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
+        lease_modifier = f"+{lease_seconds} seconds"
+
+        def claim(connection: sqlite3.Connection) -> ApplicationWork | None:
+            connection.execute(
+                """UPDATE applications
+                   SET status = 'failed', lease_expires_at = NULL,
+                       error = COALESCE(error, 'Worker lease expired before completion'),
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE status = 'processing'
+                     AND lease_expires_at <= CURRENT_TIMESTAMP"""
+            )
+            existing = connection.execute(
+                """SELECT source_signature, source_url, resolved_url, title, source_subject,
+                          attempt_count
+                   FROM applications
+                   WHERE status IN ('pending', 'failed') AND attempt_count < ?
+                   ORDER BY source_signature, source_url, resolved_url
+                   LIMIT 1""",
+                (max_attempts,),
+            ).fetchone()
+            if existing is not None:
+                connection.execute(
+                    """UPDATE applications
+                       SET status = 'processing', attempt_count = attempt_count + 1,
+                           lease_expires_at = datetime('now', ?), claimed_at = CURRENT_TIMESTAMP,
+                           updated_at = CURRENT_TIMESTAMP
+                       WHERE source_signature = ? AND source_url = ? AND resolved_url = ?""",
+                    (lease_modifier, existing[0], existing[1], existing[2]),
+                )
+                return ApplicationWork(*existing[:5], existing[5] + 1)
+
+            resolved = connection.execute(
+                """SELECT source_signature, source_url, resolved_url, title, source_subject
+                   FROM resolved_listings WHERE is_read = 0
+                   ORDER BY source_signature, source_url, resolved_url LIMIT 1"""
+            ).fetchone()
+            if resolved is None:
+                return None
+            connection.execute(
+                """INSERT INTO applications
+                   (source_signature, source_url, resolved_url, title, source_subject,
+                    status, lease_expires_at, attempt_count, claimed_at)
+                   VALUES (?, ?, ?, ?, ?, 'processing', datetime('now', ?), 1, CURRENT_TIMESTAMP)""",
+                (*resolved, lease_modifier),
+            )
+            connection.execute(
+                """UPDATE resolved_listings SET is_read = 1, read_at = CURRENT_TIMESTAMP
+                   WHERE source_signature = ? AND source_url = ? AND resolved_url = ?""",
+                resolved[:3],
+            )
+            return ApplicationWork(*resolved, 1)
+
+        return self._database.write(claim)
+
+    def mark_application_awaiting_review(self, work: ApplicationWork, screenshot_key: str) -> None:
+        """Record browser evidence and stop before any irreversible submission."""
+        self._database.write(
+            lambda connection: connection.execute(
+                """UPDATE applications
+                   SET status = 'awaiting_review', screenshot_key = ?, error = NULL,
+                       lease_expires_at = NULL, completed_at = CURRENT_TIMESTAMP,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE source_signature = ? AND source_url = ? AND resolved_url = ?
+                     AND status = 'processing'""",
+                (screenshot_key, work.source_signature, work.source_url, work.resolved_url),
+            )
+        )
+
+    def mark_application_failed(self, work: ApplicationWork, error: str) -> None:
+        """Persist a retryable browser failure and release its lease."""
+        self._database.write(
+            lambda connection: connection.execute(
+                """UPDATE applications
+                   SET status = 'failed', error = ?, lease_expires_at = NULL,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE source_signature = ? AND source_url = ? AND resolved_url = ?
+                     AND status = 'processing'""",
+                (error, work.source_signature, work.source_url, work.resolved_url),
+            )
+        )
+
+    def application_status(
+        self, source_signature: str, source_url: str, resolved_url: str
+    ) -> str | None:
+        """Return a durable application state for an API or worker test."""
+        return self._database.read(
+            lambda connection: (
+                row[0]
+                if (
+                    row := connection.execute(
+                        """SELECT status FROM applications
+                           WHERE source_signature = ? AND source_url = ? AND resolved_url = ?""",
+                        (source_signature, source_url, resolved_url),
+                    ).fetchone()
+                )
+                else None
             )
         )

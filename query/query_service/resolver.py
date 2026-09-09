@@ -162,6 +162,7 @@ def resolve_once(
             context.add_cookies(parse_cookie_header(cookie))
             for item in queued:
                 page = context.new_page()
+                destination = page
                 attempt: dict[str, str] = {"step": "creating browser page", "action_role": "none"}
                 try:
                     destination = _view_listing(page, item.url, attempt)
@@ -195,6 +196,8 @@ def resolve_once(
                         error,
                     )
                 finally:
+                    if destination is not page:
+                        destination.close()
                     page.close()
                 # This is deliberately between attempts, including failures:
                 # an invalid-session retry should not hammer Stekkies.
