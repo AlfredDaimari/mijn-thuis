@@ -4,7 +4,7 @@ from email.message import EmailMessage
 from pathlib import Path
 
 from query_service.service import StekkiesQueryService
-from query_service.store import SeenEmailStore
+from query_service.database import EmailDatabase
 from query_service.yahoo import YahooMailbox, parse_listing_email
 
 
@@ -79,12 +79,11 @@ class QueryServiceTests(unittest.TestCase):
         fake_imap = FakeImap(raw_messages)
         mailbox = YahooMailbox("person@yahoo.com", "app-password", client=fake_imap)
         with tempfile.TemporaryDirectory() as directory:
-            store = SeenEmailStore(Path(directory) / "seen.sqlite3")
-            service = StekkiesQueryService(mailbox, store)
+            database = EmailDatabase(Path(directory) / "seen.sqlite3")
+            service = StekkiesQueryService(mailbox, database)
             first_poll = service.poll_once()
             second_poll = service.poll_once()
-            queued = store.unread_emails()
-            store.close()
+            queued = database.unread_emails()
 
         self.assertEqual(len(first_poll), 1)
         self.assertEqual(second_poll, [])
@@ -107,8 +106,7 @@ class QueryServiceTests(unittest.TestCase):
         )
         mailbox = YahooMailbox("person@yahoo.com", "app-password", client=fake_imap)
         with tempfile.TemporaryDirectory() as directory:
-            store = SeenEmailStore(Path(directory) / "seen.sqlite3")
-            service = StekkiesQueryService(mailbox, store)
+            database = EmailDatabase(Path(directory) / "seen.sqlite3")
+            service = StekkiesQueryService(mailbox, database)
             self.assertEqual(len(service.poll_once()), 1)
-            self.assertEqual(len(store.unread_emails()), 1)
-            store.close()
+            self.assertEqual(len(database.unread_emails()), 1)

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from query_service.extractor import Listing, extract_listings
 from query_service.processor import process_once
-from query_service.store import ListingStore, SeenEmailStore
+from query_service.database import EmailDatabase, ListingDatabase
 
 
 def raw_email(body: str) -> bytes:
@@ -42,38 +42,33 @@ class ListingProcessorTests(unittest.TestCase):
 
     def test_processor_marks_successful_email_read(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            staging_store = SeenEmailStore(Path(directory) / "staging.sqlite3")
-            listing_store = ListingStore(Path(directory) / "listings.sqlite3")
-            staging_store.remember_if_new("signature", "<id>", "alerts@stekkies.com", "Listings", raw_email('<a href="https://houses.test/42">View match</a>'))
-            self.assertEqual(process_once(staging_store, listing_store), 1)
-            self.assertEqual(staging_store.unread_emails(), [])
-            queued_listings = listing_store.unread_listings()
+            staging_database = EmailDatabase(Path(directory) / "staging.sqlite3")
+            listings_database = ListingDatabase(Path(directory) / "listings.sqlite3")
+            staging_database.remember_if_new("signature", "<id>", "alerts@stekkies.com", "Listings", raw_email('<a href="https://houses.test/42">View match</a>'))
+            self.assertEqual(process_once(staging_database, listings_database), 1)
+            self.assertEqual(staging_database.unread_emails(), [])
+            queued_listings = listings_database.unread_listings()
             self.assertEqual(len(queued_listings), 1)
             self.assertEqual(queued_listings[0].url, "https://houses.test/42")
-            listing_store.mark_read("signature", "https://houses.test/42")
-            self.assertEqual(listing_store.unread_listings(), [])
-            staging_store.close()
-            listing_store.close()
+            listings_database.mark_read("signature", "https://houses.test/42")
+            self.assertEqual(listings_database.unread_listings(), [])
 
     def test_a_read_email_can_be_requeued_for_a_controlled_replay(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            store = SeenEmailStore(Path(directory) / "queue.sqlite3")
-            store.remember_if_new("signature", "<id>", "alerts@stekkies.com", "Listings", raw_email("https://houses.test/42"))
-            store.mark_read("signature")
-            self.assertEqual(store.unread_emails(), [])
-            store.mark_unread("signature")
-            self.assertEqual(len(store.unread_emails()), 1)
-            store.close()
+            database = EmailDatabase(Path(directory) / "queue.sqlite3")
+            database.remember_if_new("signature", "<id>", "alerts@stekkies.com", "Listings", raw_email("https://houses.test/42"))
+            database.mark_read("signature")
+            self.assertEqual(database.unread_emails(), [])
+            database.mark_unread("signature")
+            self.assertEqual(len(database.unread_emails()), 1)
 
     def test_processor_logs_and_marks_read_when_no_listing_can_be_extracted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            store = SeenEmailStore(Path(directory) / "staging.sqlite3")
-            listing_store = ListingStore(Path(directory) / "listings.sqlite3")
-            store.remember_if_new("signature", "<id>", "alerts@stekkies.com", "Newsletter", raw_email("No listings"))
+            database = EmailDatabase(Path(directory) / "staging.sqlite3")
+            listings_database = ListingDatabase(Path(directory) / "listings.sqlite3")
+            database.remember_if_new("signature", "<id>", "alerts@stekkies.com", "Newsletter", raw_email("No listings"))
             with self.assertLogs(level="ERROR") as logs:
-                self.assertEqual(process_once(store, listing_store), 1)
+                self.assertEqual(process_once(database, listings_database), 1)
             self.assertIn("No listing links could be extracted", logs.output[0])
-            self.assertEqual(store.unread_emails(), [])
-            self.assertEqual(listing_store.unread_listings(), [])
-            store.close()
-            listing_store.close()
+            self.assertEqual(database.unread_emails(), [])
+            self.assertEqual(listings_database.unread_listings(), [])

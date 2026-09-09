@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from query_service.resolver import parse_cookie_header, resolve_once
-from query_service.store import ListingStore, ResolvedListingStore
+from query_service.database import ListingDatabase, ResolvedListingDatabase
 
 
 class FakeLocator:
@@ -103,8 +103,8 @@ class ResolverTests(unittest.TestCase):
 
     def test_resolver_writes_external_url_then_marks_source_read(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            listings = ListingStore(Path(directory) / "listings.sqlite3")
-            resolved = ResolvedListingStore(Path(directory) / "resolved.sqlite3")
+            listings = ListingDatabase(Path(directory) / "listings.sqlite3")
+            resolved = ResolvedListingDatabase(Path(directory) / "resolved.sqlite3")
             listings.add_if_new("email-1", "https://email.stekkies.com/e/c/42", "Go to listing", "Listings")
             fake = FakePlaywright()
 
@@ -122,13 +122,11 @@ class ResolverTests(unittest.TestCase):
             self.assertEqual(len(queued), 1)
             self.assertEqual(queued[0].resolved_url, "https://provider.example/listings/42")
             self.assertEqual(fake.context.cookies[0]["name"], "session")
-            listings.close()
-            resolved.close()
 
     def test_failed_click_is_logged_and_keeps_source_listing_unread(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            listings = ListingStore(Path(directory) / "listings.sqlite3")
-            resolved = ResolvedListingStore(Path(directory) / "resolved.sqlite3")
+            listings = ListingDatabase(Path(directory) / "listings.sqlite3")
+            resolved = ResolvedListingDatabase(Path(directory) / "resolved.sqlite3")
             listings.add_if_new("email-1", "https://email.stekkies.com/e/c/42", "View match", "Listings")
 
             with self.assertLogs(level="ERROR") as logs:
@@ -146,5 +144,3 @@ class ResolverTests(unittest.TestCase):
             self.assertIn("leaving it unread for retry", logs.output[0])
             self.assertIn("step=locating Go to listing action", logs.output[0])
             self.assertIn("current_url=https://www.stekkies.com/e/c/42", logs.output[0])
-            listings.close()
-            resolved.close()

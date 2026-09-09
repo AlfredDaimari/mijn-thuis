@@ -12,7 +12,7 @@ from pathlib import Path
 from query_service.config import load_settings
 from query_service.extractor import extract_listings
 from query_service.processor import process_once
-from query_service.store import ListingStore, SeenEmailStore
+from query_service.database import EmailDatabase, ListingDatabase
 from query_service.yahoo import YahooMailbox
 
 QUERY_DIRECTORY = Path(__file__).resolve().parents[1]
@@ -43,35 +43,31 @@ class LiveEmailFlowTests(unittest.TestCase):
         for database in (TEST_STAGING_DATABASE, TEST_LISTINGS_DATABASE):
             if database.exists():
                 database.unlink()
-        store = SeenEmailStore(TEST_STAGING_DATABASE)
-        listing_store = ListingStore(TEST_LISTINGS_DATABASE)
-        try:
-            self.assertTrue(
-                store.remember_if_new(
-                    live_email.signature,
-                    live_email.message_id,
-                    live_email.sender,
-                    live_email.subject,
-                    live_email.raw_message,
-                )
+        store = EmailDatabase(TEST_STAGING_DATABASE)
+        listing_store = ListingDatabase(TEST_LISTINGS_DATABASE)
+        self.assertTrue(
+            store.remember_if_new(
+                live_email.signature,
+                live_email.message_id,
+                live_email.sender,
+                live_email.subject,
+                live_email.raw_message,
             )
-            # Deliberately demonstrate the queue transition in the test database.
-            store.mark_read(live_email.signature)
-            store.mark_unread(live_email.signature)
-            self.assertEqual(len(store.unread_emails()), 1)
+        )
+        # Deliberately demonstrate the queue transition in the test database.
+        store.mark_read(live_email.signature)
+        store.mark_unread(live_email.signature)
+        self.assertEqual(len(store.unread_emails()), 1)
 
-            with self.assertLogs(level="INFO") as logs:
-                self.assertEqual(process_once(store, listing_store), 1)
+        with self.assertLogs(level="INFO") as logs:
+            self.assertEqual(process_once(store, listing_store), 1)
 
-            extracted_urls = [listing.url for listing in extract_listings(live_email.raw_message)]
-            self.assertTrue(extracted_urls, "No listing URLs were extracted from the selected email")
-            for url in extracted_urls:
-                self.assertTrue(
-                    any(url in line for line in logs.output),
-                    f"Expected extracted listing URL in logs: {url}",
-                )
-            self.assertEqual(store.unread_emails(), [])
-            self.assertEqual(len(listing_store.unread_listings()), len(extracted_urls))
-        finally:
-            store.close()
-            listing_store.close()
+        extracted_urls = [listing.url for listing in extract_listings(live_email.raw_message)]
+        self.assertTrue(extracted_urls, "No listing URLs were extracted from the selected email")
+        for url in extracted_urls:
+            self.assertTrue(
+                any(url in line for line in logs.output),
+                f"Expected extracted listing URL in logs: {url}",
+            )
+        self.assertEqual(store.unread_emails(), [])
+        self.assertEqual(len(listing_store.unread_listings()), len(extracted_urls))
