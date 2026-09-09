@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
+from urllib.parse import urlparse
 
 
 Result = TypeVar("Result")
@@ -290,6 +291,14 @@ class ResolvedCandidate:
 
 
 @dataclass(frozen=True)
+class ProviderSource:
+    host: str
+    resolved_count: int
+    first_resolved_at: str
+    last_resolved_at: str
+
+
+@dataclass(frozen=True)
 class ApplicationWork:
     """A leased provider-listing visit that awaits human review after capture."""
 
@@ -368,6 +377,12 @@ class PipelineDatabase:
     """
 
     _APPLICATION_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS provider_sources (
+            host TEXT PRIMARY KEY,
+            resolved_count INTEGER NOT NULL DEFAULT 0,
+            first_resolved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_resolved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS applications (
             source_signature TEXT NOT NULL,
             source_url TEXT NOT NULL,
@@ -526,9 +541,24 @@ class PipelineDatabase:
                    WHERE source_signature = ? AND url = ?""",
                 (listing.source_signature, listing.url),
             )
+            if cursor.rowcount == 1:
+                host = (urlparse(resolved_url).hostname or "unknown").lower()
+                connection.execute(
+                    """INSERT INTO provider_sources (host, resolved_count)
+                       VALUES (?, 1)
+                       ON CONFLICT(host) DO UPDATE SET resolved_count = resolved_count + 1,
+                         last_resolved_at = CURRENT_TIMESTAMP""",
+                    (host,),
+                )
             return cursor.rowcount == 1
 
         return self._database.write(write)
+
+    def provider_source_tally(self) -> list[ProviderSource]:
+        """Rank provider domains to decide which adapters deserve automation."""
+        return self._database.read(lambda connection: [ProviderSource(*row) for row in connection.execute(
+            "SELECT host, resolved_count, first_resolved_at, last_resolved_at FROM provider_sources ORDER BY resolved_count DESC, host"
+        ).fetchall()])
 
     def unread_resolved_listings(self, limit: int = 50) -> list[ResolvedListing]:
         return self._database.read(
