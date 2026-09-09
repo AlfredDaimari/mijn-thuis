@@ -1,0 +1,2 @@
+# Installed only into ansible/.venv by run-playbook.sh.
+ansible-core>=2.16,<2.20
