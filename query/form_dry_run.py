@@ -1,7 +1,9 @@
 """No-submit evaluation of generic provider contact-form filling."""
 import logging
 import sqlite3
+from collections import Counter
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
 from playwright.sync_api import sync_playwright
@@ -27,7 +29,8 @@ def main() -> None:
     output = root / "tmp" / "form-dry-run"
     output.mkdir(parents=True, exist_ok=True)
     database = PipelineDatabase(query_directory / "data" / "pipeline.sqlite3")
-    candidates = database.resolved_candidates_for_form_test()
+    candidates = database.resolved_candidates_for_form_test(limit=1_000)
+    results: Counter[tuple[str, str]] = Counter()
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         for candidate in candidates:
@@ -50,11 +53,20 @@ def main() -> None:
                     filled.append(field_kind)
                 page.screenshot(path=str(output / after))
                 database.record_form_test_evidence(number, str(Path("tmp/form-dry-run") / before), str(Path("tmp/form-dry-run") / after))
+                results[(urlparse(url).hostname or "unknown", "filled")] += 1
                 logging.info("Dry-run form filled | number=%d fields=%s url=%s", number, ",".join(filled) or "none", url)
             except Exception as error:
+                failure = f"{number}-no-form.png"
+                page.screenshot(path=str(output / failure))
+                database.record_form_test_evidence(number, str(Path("tmp/form-dry-run") / failure), None)
+                results[(urlparse(url).hostname or "unknown", "failed")] += 1
                 logging.error("Dry-run form failed | number=%d error=%s url=%s", number, error, url)
             finally: page.close()
         browser.close()
+    total = sum(results.values())
+    for (host, status), count in sorted(results.items()):
+        logging.info("Dry-run summary | host=%s status=%s count=%d", host, status, count)
+    logging.info("Dry-run summary | total=%d filled=%d success_rate=%.1f%%", total, sum(count for (_host, status), count in results.items() if status == "filled"), 100 * sum(count for (_host, status), count in results.items() if status == "filled") / total if total else 0)
 
 
 if __name__ == "__main__":
