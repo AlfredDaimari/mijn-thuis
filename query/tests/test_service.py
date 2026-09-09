@@ -1,10 +1,11 @@
-import tempfile
-import unittest
-from email.message import EmailMessage
-from pathlib import Path
+"""Service-group tests for read-only Yahoo polling."""
 
-from query_service.service import StekkiesQueryService
+from email.message import EmailMessage
+
+import pytest
+
 from query_service.database import EmailDatabase
+from query_service.service import StekkiesQueryService
 from query_service.yahoo import YahooMailbox, parse_listing_email
 
 
@@ -19,6 +20,8 @@ def message_bytes(sender: str, subject: str, body: str, message_id: str) -> byte
 
 
 class FakeImap:
+    """Minimal IMAP double that records whether messages were fetched safely."""
+
     def __init__(self, messages: list[bytes]) -> None:
         self.messages = messages
         self.fetch_commands: list[tuple[object, ...]] = []
@@ -45,68 +48,74 @@ class FakeImap:
         return "BYE", []
 
 
-class QueryServiceTests(unittest.TestCase):
-    def test_parses_stekkies_links_only(self) -> None:
-        parsed = parse_listing_email(
-            message_bytes(
-                "Stekkies <alerts@stekkies.com>",
-                "New listings",
-                "See https://stekkies.com/listing/42 and https://example.test/info",
-                "<one@example.test>",
-            )
+@pytest.mark.unit
+def test_parser_accepts_a_stekkies_email_and_keeps_its_listing_link() -> None:
+    """A Stekkies sender is parsed while unrelated URLs are left untouched."""
+    parsed = parse_listing_email(
+        message_bytes(
+            "Stekkies <alerts@stekkies.com>", "New listings",
+            "See https://stekkies.com/listing/42 and https://example.test/info",
+            "<one@example.test>",
         )
-        self.assertIsNotNone(parsed)
-        assert parsed is not None
-        self.assertEqual(parsed.links[0], "https://stekkies.com/listing/42")
-        self.assertEqual(parsed.received_at, "Tue, 08 Sep 2026 09:30:00 +0200")
+    )
 
-    def test_ignores_non_stekkies_sender(self) -> None:
-        parsed = parse_listing_email(
-            message_bytes("news@example.test", "Other", "https://example.test", "<two@example.test>")
-        )
-        self.assertIsNone(parsed)
+    assert parsed is not None
+    assert parsed.links[0] == "https://stekkies.com/listing/42"
+    assert parsed.received_at == "Tue, 08 Sep 2026 09:30:00 +0200"
 
-    def test_poll_marks_a_message_seen_and_does_not_change_yahoo_read_state(self) -> None:
-        raw_messages = [
+
+@pytest.mark.unit
+def test_parser_ignores_email_from_a_non_stekkies_sender() -> None:
+    """Only sender addresses under the Stekkies domain enter the pipeline."""
+    parsed = parse_listing_email(
+        message_bytes("news@example.test", "Other", "https://example.test", "<two@example.test>")
+    )
+
+    assert parsed is None
+
+
+@pytest.mark.service
+def test_poller_queues_a_new_email_without_changing_yahoo_read_state(tmp_path) -> None:
+    """Polling twice keeps one queue item and uses IMAP's read-only PEEK fetch."""
+    raw_messages = [
+        message_bytes(
+            "Stekkies <alerts@stekkies.com>", "New listing", "https://stekkies.com/listing/42",
+            "<listing@example.test>",
+        ),
+        message_bytes("news@example.test", "Other", "ignore", "<other@example.test>"),
+    ]
+    fake_imap = FakeImap(raw_messages)
+    mailbox = YahooMailbox("person@yahoo.com", "app-password", client=fake_imap)
+    database = EmailDatabase(tmp_path / "seen.sqlite3")
+    service = StekkiesQueryService(mailbox, database)
+
+    first_poll = service.poll_once()
+    second_poll = service.poll_once()
+    queued = database.unread_emails()
+
+    assert len(first_poll) == 1
+    assert second_poll == []
+    assert len(queued) == 1
+    assert queued[0].raw_message == raw_messages[0]
+    assert fake_imap.selected == ("INBOX", True)
+    assert all(command[1] == "(BODY.PEEK[])" for command in fake_imap.fetch_commands)
+
+
+@pytest.mark.service
+def test_poller_queues_stekkies_email_without_listing_for_observable_processing(tmp_path) -> None:
+    """A Stekkies newsletter stays queued so the processor can log its error."""
+    fake_imap = FakeImap(
+        [
             message_bytes(
-                "Stekkies <alerts@stekkies.com>",
-                "New listing",
-                "https://stekkies.com/listing/42",
-                "<listing@example.test>",
+                "Stekkies <alerts@stekkies.com>", "Newsletter", "No listing links today",
+                "<newsletter@example.test>",
             ),
             message_bytes("news@example.test", "Other", "ignore", "<other@example.test>"),
         ]
-        fake_imap = FakeImap(raw_messages)
-        mailbox = YahooMailbox("person@yahoo.com", "app-password", client=fake_imap)
-        with tempfile.TemporaryDirectory() as directory:
-            database = EmailDatabase(Path(directory) / "seen.sqlite3")
-            service = StekkiesQueryService(mailbox, database)
-            first_poll = service.poll_once()
-            second_poll = service.poll_once()
-            queued = database.unread_emails()
+    )
+    mailbox = YahooMailbox("person@yahoo.com", "app-password", client=fake_imap)
+    database = EmailDatabase(tmp_path / "seen.sqlite3")
+    service = StekkiesQueryService(mailbox, database)
 
-        self.assertEqual(len(first_poll), 1)
-        self.assertEqual(second_poll, [])
-        self.assertEqual(len(queued), 1)
-        self.assertEqual(queued[0].raw_message, raw_messages[0])
-        self.assertEqual(fake_imap.selected, ("INBOX", True))
-        self.assertTrue(all(command[1] == "(BODY.PEEK[])" for command in fake_imap.fetch_commands))
-
-    def test_new_stekkies_email_without_links_is_queued_for_the_processor(self) -> None:
-        fake_imap = FakeImap(
-            [
-                message_bytes(
-                    "Stekkies <alerts@stekkies.com>",
-                    "Newsletter",
-                    "No listing links today",
-                    "<newsletter@example.test>",
-                ),
-                message_bytes("news@example.test", "Other", "ignore", "<other@example.test>"),
-            ]
-        )
-        mailbox = YahooMailbox("person@yahoo.com", "app-password", client=fake_imap)
-        with tempfile.TemporaryDirectory() as directory:
-            database = EmailDatabase(Path(directory) / "seen.sqlite3")
-            service = StekkiesQueryService(mailbox, database)
-            self.assertEqual(len(service.poll_once()), 1)
-            self.assertEqual(len(database.unread_emails()), 1)
+    assert len(service.poll_once()) == 1
+    assert len(database.unread_emails()) == 1

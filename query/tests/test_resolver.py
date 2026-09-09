@@ -1,9 +1,9 @@
-import tempfile
-import unittest
-from pathlib import Path
+"""Resolver-group tests using a local fake Playwright browser."""
 
-from query_service.resolver import parse_cookie_header, resolve_once
+import pytest
+
 from query_service.database import ListingDatabase, ResolvedListingDatabase
+from query_service.resolver import parse_cookie_header, resolve_once
 
 
 class FakeLocator:
@@ -93,54 +93,58 @@ class FakePlaywright:
         return FakeBrowser(self.context)
 
 
-class ResolverTests(unittest.TestCase):
-    def test_parses_cookie_header_for_the_stekkies_browser_context(self) -> None:
-        cookies = parse_cookie_header("session=abc==; preferences=dark")
-        self.assertEqual(cookies[0]["name"], "session")
-        self.assertEqual(cookies[0]["value"], "abc==")
-        self.assertEqual(cookies[0]["url"], "https://www.stekkies.com")
-        self.assertEqual(cookies[1]["name"], "preferences")
+@pytest.mark.unit
+def test_cookie_parser_builds_stekkies_browser_context_cookie() -> None:
+    """Cookie header values become secure Playwright cookies for Stekkies only."""
+    cookies = parse_cookie_header("session=abc==; preferences=dark")
 
-    def test_resolver_writes_external_url_then_marks_source_read(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            listings = ListingDatabase(Path(directory) / "listings.sqlite3")
-            resolved = ResolvedListingDatabase(Path(directory) / "resolved.sqlite3")
-            listings.add_if_new("email-1", "https://email.stekkies.com/e/c/42", "Go to listing", "Listings")
-            fake = FakePlaywright()
+    assert cookies[0]["name"] == "session"
+    assert cookies[0]["value"] == "abc=="
+    assert cookies[0]["url"] == "https://www.stekkies.com"
+    assert cookies[1]["name"] == "preferences"
 
-            count = resolve_once(
-                listings,
-                resolved,
-                "session=abc",
-                sleeper=lambda _seconds: None,
-                playwright_factory=lambda: fake,
-            )
 
-            self.assertEqual(count, 1)
-            self.assertEqual(listings.unread_listings(), [])
-            queued = resolved.unread_listings()
-            self.assertEqual(len(queued), 1)
-            self.assertEqual(queued[0].resolved_url, "https://provider.example/listings/42")
-            self.assertEqual(fake.context.cookies[0]["name"], "session")
+@pytest.mark.resolver
+def test_resolver_persists_external_url_before_marking_source_read(tmp_path) -> None:
+    """A successful browser visit writes the durable output then advances input."""
+    listings = ListingDatabase(tmp_path / "listings.sqlite3")
+    resolved = ResolvedListingDatabase(tmp_path / "resolved.sqlite3")
+    listings.add_if_new(
+        "email-1", "https://email.stekkies.com/e/c/42", "Go to listing", "Listings"
+    )
+    fake = FakePlaywright()
 
-    def test_failed_click_is_logged_and_keeps_source_listing_unread(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            listings = ListingDatabase(Path(directory) / "listings.sqlite3")
-            resolved = ResolvedListingDatabase(Path(directory) / "resolved.sqlite3")
-            listings.add_if_new("email-1", "https://email.stekkies.com/e/c/42", "View match", "Listings")
+    count = resolve_once(
+        listings, resolved, "session=abc", sleeper=lambda _seconds: None,
+        playwright_factory=lambda: fake,
+    )
 
-            with self.assertLogs(level="ERROR") as logs:
-                count = resolve_once(
-                    listings,
-                    resolved,
-                    "session=abc",
-                    sleeper=lambda _seconds: None,
-                    playwright_factory=lambda: FakePlaywright(RuntimeError("expired session")),
-                )
+    assert count == 1
+    assert listings.unread_listings() == []
+    queued = resolved.unread_listings()
+    assert len(queued) == 1
+    assert queued[0].resolved_url == "https://provider.example/listings/42"
+    assert fake.context.cookies[0]["name"] == "session"
 
-            self.assertEqual(count, 0)
-            self.assertEqual(len(listings.unread_listings()), 1)
-            self.assertEqual(resolved.unread_listings(), [])
-            self.assertIn("leaving it unread for retry", logs.output[0])
-            self.assertIn("step=locating Go to listing action", logs.output[0])
-            self.assertIn("current_url=https://www.stekkies.com/e/c/42", logs.output[0])
+
+@pytest.mark.resolver
+def test_resolver_logs_context_and_retries_when_click_fails(caplog, tmp_path) -> None:
+    """An expired browser session logs diagnostics and leaves the listing unread."""
+    listings = ListingDatabase(tmp_path / "listings.sqlite3")
+    resolved = ResolvedListingDatabase(tmp_path / "resolved.sqlite3")
+    listings.add_if_new(
+        "email-1", "https://email.stekkies.com/e/c/42", "View match", "Listings"
+    )
+
+    with caplog.at_level("ERROR"):
+        count = resolve_once(
+            listings, resolved, "session=abc", sleeper=lambda _seconds: None,
+            playwright_factory=lambda: FakePlaywright(RuntimeError("expired session")),
+        )
+
+    assert count == 0
+    assert len(listings.unread_listings()) == 1
+    assert resolved.unread_listings() == []
+    assert "leaving it unread for retry" in caplog.text
+    assert "step=locating Go to listing action" in caplog.text
+    assert "current_url=https://www.stekkies.com/e/c/42" in caplog.text

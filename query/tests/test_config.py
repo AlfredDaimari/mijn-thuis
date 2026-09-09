@@ -1,36 +1,43 @@
-import tempfile
-import unittest
-from pathlib import Path
+"""Unit tests for the user-supplied query-service configuration."""
+
+import pytest
 
 from query_service.config import load_settings
 
 
-class SettingsTests(unittest.TestCase):
-    def test_loads_email_and_app_password(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            values = Path(directory) / "values.yaml"
-            values.write_text("email: person@yahoo.com\npassword: app-password\n")
-            settings = load_settings(values)
+pytestmark = pytest.mark.unit
 
-        self.assertEqual(settings.email, "person@yahoo.com")
-        self.assertEqual(settings.password, "app-password")
 
-    def test_rejects_missing_password(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            values = Path(directory) / "values.yaml"
-            values.write_text("email: person@yahoo.com\n")
-            with self.assertRaisesRegex(ValueError, "password"):
-                load_settings(values)
+def test_load_settings_reads_yahoo_credentials(tmp_path) -> None:
+    """A valid values file exposes the email address and app password."""
+    values = tmp_path / "values.yaml"
+    values.write_text("email: person@yahoo.com\npassword: app-password\n")
 
-    def test_uses_configured_database_paths(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            values = Path(directory) / "values.yaml"
-            values.write_text(
-                "email: person@yahoo.com\npassword: app-password\n"
-                "staging_database: state/staging.sqlite3\n"
-                "listings_database: state/listings.sqlite3\n"
-            )
-            settings = load_settings(values)
+    settings = load_settings(values)
 
-        self.assertEqual(settings.staging_database, "state/staging.sqlite3")
-        self.assertEqual(settings.listings_database, "state/listings.sqlite3")
+    assert settings.email == "person@yahoo.com"
+    assert settings.password == "app-password"
+
+
+def test_load_settings_explains_when_password_is_missing(tmp_path) -> None:
+    """A normal Yahoo password cannot be silently replaced by an absent value."""
+    values = tmp_path / "values.yaml"
+    values.write_text("email: person@yahoo.com\n")
+
+    with pytest.raises(ValueError, match="password"):
+        load_settings(values)
+
+
+def test_load_settings_keeps_configured_database_paths(tmp_path) -> None:
+    """Operators may keep queue databases outside the default data directory."""
+    values = tmp_path / "values.yaml"
+    values.write_text(
+        "email: person@yahoo.com\npassword: app-password\n"
+        "staging_database: state/staging.sqlite3\n"
+        "listings_database: state/listings.sqlite3\n"
+    )
+
+    settings = load_settings(values)
+
+    assert settings.staging_database == "state/staging.sqlite3"
+    assert settings.listings_database == "state/listings.sqlite3"
