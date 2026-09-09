@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # mounted at runtime so credentials and SQLite state outlive a container.
 COPY query_service/ ./query_service/
 
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data /app/screenshots
 
 VOLUME ["/app/data"]
 STOPSIGNAL SIGINT

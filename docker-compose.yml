@@ -1,0 +1,50 @@
+name: house-pipeline
+
+x-worker: &worker
+  image: house-query-service:local
+  build:
+    context: ./query
+  init: true
+  restart: unless-stopped
+  volumes:
+    - house-query-data:/app/data
+    - type: bind
+      source: ${QUERY_VALUES_FILE:-./query/values.yaml}
+      target: /app/values.yaml
+      read_only: true
+
+services:
+  poller:
+    <<: *worker
+    command: ["python", "-m", "query_service"]
+    mem_limit: 256m
+
+  extractor:
+    <<: *worker
+    command: ["python", "-m", "query_service.processor"]
+    mem_limit: 256m
+
+  resolver:
+    <<: *worker
+    command: ["python", "-m", "query_service.resolver"]
+    mem_limit: 1g
+    shm_size: 512mb
+
+  application-review:
+    <<: *worker
+    command: ["python", "-m", "query_service.application_worker"]
+    mem_limit: 1g
+    shm_size: 512mb
+    volumes:
+      - house-query-data:/app/data
+      - house-screenshots:/app/screenshots
+      - type: bind
+        source: ${QUERY_VALUES_FILE:-./query/values.yaml}
+        target: /app/values.yaml
+        read_only: true
+
+volumes:
+  house-query-data:
+    name: house-query-data
+  house-screenshots:
+    name: house-screenshots

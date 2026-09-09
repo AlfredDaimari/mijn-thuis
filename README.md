@@ -18,17 +18,14 @@ For convenience, use `./run-poller.sh` and `./run-processor.sh` from `query/`. `
 
 `./run-resolver.sh` is the third process. It uses local headless Chromium through Playwright, not Browserbase. Paste a logged-in Stekkies browser Cookie header into the Git-ignored `values.yaml`; Playwright loads those cookies into its browser context, opens the exact emailed **View match** link, and follows the rendered listing action (currently **Go to listing**) to write the external provider URL as an unread record in `pipeline.sqlite3`. That write and marking the source listing read are one transaction. Failed navigations/clicks log the failure step, browser URLs, action URL, page title, and traceback, then stay unread for a later retry. The resolver waits a random 20–35 seconds between attempts. Install the browser once with `python3 -m playwright install chromium`. Cookies expire; replace the value after logging into Stekkies again.
 
-### Docker
+### Docker: four independent workers
 
-Build the image with `docker build -t house-query-service ./query`, then create its persistent database volume once with `docker volume create house-query-data`. The image does not contain `values.yaml` or `data/`. Mount both at runtime; the configured database paths default to `/app/data/...` because the container runs in `/app`.
+Set `database: "/app/data/pipeline.sqlite3"` in the ignored `query/values.yaml`. The Compose configuration runs four separate containers—Yahoo poller, extractor, Stekkies resolver, and provider-review worker. They communicate only through the local named SQLite volume. The provider-review worker saves screenshots to its separate named volume and stops at human review; it never fills or submits an application.
 
 ```bash
-docker run --rm --init \
-  --mount type=bind,src="$(pwd)/query/values.yaml",dst=/app/values.yaml,readonly \
-  --mount type=volume,src=house-query-data,dst=/app/data \
-  house-query-service
+docker compose up -d --build
 ```
 
-That starts the Yahoo poller. Run the other single-process consumers with the same two mounts and an overriding command: `house-query-service python -m query_service.processor` or `house-query-service python -m query_service.resolver`. The database layer creates the configured SQLite file and all three tables if they are absent. `--init` forwards signals cleanly to Python and Chromium.
+Each service is a single Python worker process; no container starts or supervises another worker process. The database layer creates the configured SQLite file and all pipeline tables if absent. Keep the named volumes on this one VPS only: SQLite WAL requires a local filesystem and the whole `/app/data` directory must be mounted so its WAL and shared-memory sidecar files persist.
 
 For a controlled live-flow demonstration, run `RUN_LIVE_YAHOO_TEST=1 python3 -m pytest -m integration -vv` from `query/`. This group is skipped unless explicitly selected. It reads one current Stekkies email from Yahoo without changing mailbox state, copies it to `query/data/test.sqlite3`, marks only the copied row unread, runs the processor, and asserts that extracted URLs are logged and queued in that same test-only database. It never changes the configured production database.
