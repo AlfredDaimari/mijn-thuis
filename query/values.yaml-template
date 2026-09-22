@@ -14,9 +14,9 @@ applicant:
   phone: "+31..."
   email: "you@example.com"
   # Used for one-room homes, and if the room count cannot be extracted.
-  message_single_person: "Hello, I am interested in this property."
+  message_single_person: "Goedendag, ik ben geïnteresseerd in deze woning. Ik hoor graag of een bezichtiging mogelijk is."
   # Used for homes with two or more rooms.
-  message_two_person: "Hello, we are interested in this property."
+  message_two_person: "Goedendag, wij zijn geïnteresseerd in deze woning. Wij horen graag of een bezichtiging mogelijk is."
 
 # Optional OpenRouter fallback for unsupported form navigation. This is a secret;
 # do not commit it. It is not sent unless deterministic form matching fails.
