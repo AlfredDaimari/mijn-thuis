@@ -10,7 +10,7 @@ pytestmark = pytest.mark.unit
 
 def test_registered_provider_flow_wins_over_the_generic_llm_path() -> None:
     """An exact provider hostname selects its deterministic Playwright flow."""
-    flow = lambda _page, _applicant, _credentials: ["email"]
+    flow = lambda _page, _applicant, _rooms, _credentials: ["email"]
     register_flow("flow-test.example", flow)
 
     assert flow_for("https://flow-test.example/listing/1") is flow

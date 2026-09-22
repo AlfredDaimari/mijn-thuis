@@ -17,7 +17,7 @@ class ProviderAdapter:
 
 GENERIC_ADAPTER = ProviderAdapter("*", "generic-dutch-then-english-form")
 _ADAPTERS: dict[str, ProviderAdapter] = {}
-ProviderFlow = Callable[[Any, ApplicantProfile, AccountCredentials | None], list[str]]
+ProviderFlow = Callable[[Any, ApplicantProfile, int | None, AccountCredentials | None], list[str]]
 _FLOWS: dict[str, ProviderFlow] = {}
 
 
@@ -32,7 +32,7 @@ def register(adapter: ProviderAdapter) -> None:
 
 
 def register_flow(host: str, flow: ProviderFlow) -> None:
-    """Register a deterministic provider Playwright flow before Gemini fallback."""
+    """Register a deterministic provider Playwright flow before OpenRouter fallback."""
     _FLOWS[host.lower()] = flow
 
 

@@ -6,7 +6,7 @@ from query_service.application_worker import process_once
 from query_service.config import ApplicantProfile
 from query_service.database import PipelineDatabase
 from query_service.form_automation import FormAutomationError
-from query_service.gemini_form_planner import GeminiFormPlanner
+from query_service.openrouter_form_planner import OpenRouterFormPlanner
 
 
 def resolved_listing(database: PipelineDatabase) -> None:
@@ -62,18 +62,20 @@ def test_provider_worker_captures_evidence_then_stops_for_review(tmp_path, monke
 
 
 @pytest.mark.service
-def test_form_failure_persists_generic_and_gemini_reason_in_application_error(tmp_path, monkeypatch) -> None:
-    """A failed Gemini fallback keeps the original reason observable in SQLite."""
+def test_form_failure_persists_generic_and_openrouter_reason_in_application_error(tmp_path, monkeypatch) -> None:
+    """A failed OpenRouter fallback keeps the original reason observable in SQLite."""
     database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
     resolved_listing(database)
-    profile = ApplicantProfile("Ada", "Lovelace", "+31600000000", "ada@example.com", "Interested")
+    profile = ApplicantProfile(
+        "Ada", "Lovelace", "+31600000000", "ada@example.com", "Interested", "Interested together"
+    )
 
     monkeypatch.setattr(
         "query_service.application_worker._fill_for_review",
         lambda *_args: (_ for _ in ()).throw(
             FormAutomationError(
                 "generic form matching failed: no visible contact form; "
-                "Gemini fallback failed: Gemini found no safe navigation action: only login"
+                "OpenRouter fallback failed: OpenRouter found no safe navigation action: only login"
             )
         ),
     )
@@ -82,7 +84,7 @@ def test_form_failure_persists_generic_and_gemini_reason_in_application_error(tm
         database,
         tmp_path / "screenshots",
         profile=profile,
-        planner=GeminiFormPlanner("test-key"),
+        planner=OpenRouterFormPlanner("test-key"),
     ) == 0
 
     error = database.application_error(
@@ -90,4 +92,4 @@ def test_form_failure_persists_generic_and_gemini_reason_in_application_error(tm
     )
     assert error is not None
     assert "no visible contact form" in error
-    assert "Gemini fallback failed" in error
+    assert "OpenRouter fallback failed" in error

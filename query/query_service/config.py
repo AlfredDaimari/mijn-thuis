@@ -13,8 +13,8 @@ class Settings:
     database: str = "data/pipeline.sqlite3"
     stekkies_cookie: str | None = None
     applicant: "ApplicantProfile | None" = None
-    gemini_api_key: str | None = None
-    gemini_model: str = "gemini-2.5-flash"
+    openrouter_api_key: str | None = None
+    openrouter_model: str = "~openai/gpt-luna-latest"
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,12 @@ class ApplicantProfile:
     last_name: str
     phone: str
     email: str
-    message: str
+    message_single_person: str
+    message_two_person: str
+
+    def message_for_rooms(self, room_count: int | None) -> str:
+        """Use the two-person wording for homes with two or more rooms."""
+        return self.message_two_person if room_count is not None and room_count >= 2 else self.message_single_person
 
 
 @dataclass(frozen=True)
@@ -48,8 +53,8 @@ def load_settings(path: str | Path) -> Settings:
     password = data.get("password")
     database = data.get("database", "data/pipeline.sqlite3")
     stekkies_cookie = data.get("stekkies_cookie")
-    gemini_api_key = data.get("gemini_api_key")
-    gemini_model = data.get("gemini_model", "gemini-2.5-flash")
+    openrouter_api_key = data.get("openrouter_api_key")
+    openrouter_model = data.get("openrouter_model", "~openai/gpt-luna-latest")
     applicant_data = data.get("applicant")
     if not isinstance(email, str) or not email.strip():
         raise ValueError("values.yaml requires a non-empty email")
@@ -59,26 +64,36 @@ def load_settings(path: str | Path) -> Settings:
         raise ValueError("values.yaml database must be a non-empty path")
     if stekkies_cookie is not None and (not isinstance(stekkies_cookie, str) or not stekkies_cookie.strip()):
         raise ValueError("values.yaml stekkies_cookie must be a non-empty string")
-    if gemini_api_key is not None and (
-        not isinstance(gemini_api_key, str) or not gemini_api_key.strip()
+    if openrouter_api_key is not None and (
+        not isinstance(openrouter_api_key, str) or not openrouter_api_key.strip()
     ):
-        gemini_api_key = None
-    if not isinstance(gemini_model, str) or not gemini_model.strip():
-        raise ValueError("values.yaml gemini_model must be a non-empty string")
+        openrouter_api_key = None
+    if not isinstance(openrouter_model, str) or not openrouter_model.strip():
+        raise ValueError("values.yaml openrouter_model must be a non-empty string")
 
     applicant = None
     if applicant_data is not None:
         if not isinstance(applicant_data, dict):
             raise ValueError("values.yaml applicant must be a mapping")
-        profile_fields = ("first_name", "last_name", "phone", "email", "message")
+        required_profile_fields = ("first_name", "last_name", "phone", "email")
         missing = [
             name
-            for name in profile_fields
+            for name in required_profile_fields
             if not isinstance(applicant_data.get(name), str) or not applicant_data[name].strip()
         ]
+        single_message = applicant_data.get("message_single_person", applicant_data.get("message"))
+        two_person_message = applicant_data.get("message_two_person")
+        if not isinstance(single_message, str) or not single_message.strip():
+            missing.append("message_single_person")
+        if not isinstance(two_person_message, str) or not two_person_message.strip():
+            missing.append("message_two_person")
         if missing:
             raise ValueError("values.yaml applicant requires non-empty " + ", ".join(missing))
-        applicant = ApplicantProfile(**{name: applicant_data[name].strip() for name in profile_fields})
+        applicant = ApplicantProfile(
+            **{name: applicant_data[name].strip() for name in required_profile_fields},
+            message_single_person=single_message.strip(),
+            message_two_person=two_person_message.strip(),
+        )
 
     return Settings(
         email=email.strip(),
@@ -86,8 +101,8 @@ def load_settings(path: str | Path) -> Settings:
         database=database.strip(),
         stekkies_cookie=stekkies_cookie.strip() if stekkies_cookie else None,
         applicant=applicant,
-        gemini_api_key=gemini_api_key.strip() if gemini_api_key else None,
-        gemini_model=gemini_model.strip(),
+        openrouter_api_key=openrouter_api_key.strip() if openrouter_api_key else None,
+        openrouter_model=openrouter_model.strip(),
     )
 
 

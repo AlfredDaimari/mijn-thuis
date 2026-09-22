@@ -1,6 +1,6 @@
-"""No-submit provider form worker with a constrained Gemini fallback.
+"""No-submit provider form worker with a constrained OpenRouter fallback.
 
-The worker may fill known contact fields and use a reviewed, allow-listed Gemini
+The worker may fill known contact fields and use a reviewed, allow-listed model
 navigation suggestion to reveal a form. It never accepts consent or submits a
 provider application.
 """
@@ -24,12 +24,12 @@ from .form_automation import (
     login_to_provider,
     visible_navigation_candidates,
 )
-from .gemini_form_planner import GeminiFormPlanner, GeminiPlanningError
+from .openrouter_form_planner import OpenRouterFormPlanner, OpenRouterPlanningError
 from .provider_adapters import flow_for
 
 
 DEFAULT_TIMEOUT_MS = 30_000
-MAX_GEMINI_STEPS = 3
+MAX_MODEL_STEPS = 3
 
 
 def _screenshot_key(work: ApplicationWork) -> str:
@@ -70,10 +70,10 @@ def _fill_for_review(
     work: ApplicationWork,
     screenshot_directory: Path,
     profile: ApplicantProfile,
-    planner: GeminiFormPlanner,
+    planner: OpenRouterFormPlanner,
     accounts: dict[str, AccountCredentials],
 ) -> tuple[str, list[str], str | None]:
-    """Fill recognised fields, asking Gemini only after generic matching fails.
+    """Fill recognised fields, asking OpenRouter only after generic matching fails.
 
     The planner is deliberately not given applicant values. Its click plan is
     validated again before Playwright can execute it.
@@ -90,7 +90,7 @@ def _fill_for_review(
     screenshot_key = _screenshot_key(work)
     screenshot_path = screenshot_directory / screenshot_key
     temporary_path = screenshot_directory / f".{screenshot_key}.tmp.png"
-    gemini_reasons: list[str] = []
+    model_reasons: list[str] = []
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         context = browser.new_context()
@@ -101,19 +101,21 @@ def _fill_for_review(
             if provider_flow is not None:
                 host = (urlparse(page.url).hostname or "").lower()
                 credentials = accounts.get(host) or accounts.get(host.removeprefix("www."))
-                filled = provider_flow(page, profile, credentials)
-                gemini_reasons.append("provider-specific Playwright flow")
+                filled = provider_flow(page, profile, work.room_count, credentials)
+                model_reasons.append("provider-specific Playwright flow")
             else:
-                for step in range(MAX_GEMINI_STEPS + 1):
+                for step in range(MAX_MODEL_STEPS + 1):
                     try:
-                        filled = fill_generic_form(page, profile)
+                        filled = fill_generic_form(
+                            page, profile, profile.message_for_rooms(work.room_count)
+                        )
                         break
                     except FormAutomationError as generic_error:
                         generic_reason = str(generic_error)
-                    if step == MAX_GEMINI_STEPS:
+                    if step == MAX_MODEL_STEPS:
                         raise FormAutomationError(
                             f"generic form matching failed: {generic_reason}; "
-                            f"Gemini fallback exhausted after {MAX_GEMINI_STEPS} steps"
+                            f"OpenRouter fallback exhausted after {MAX_MODEL_STEPS} steps"
                         )
                     try:
                         plan = planner.plan(
@@ -123,7 +125,7 @@ def _fill_for_review(
                         )
                         if not plan.actions:
                             raise FormAutomationError(
-                                f"Gemini found no safe navigation action: {plan.reason}"
+                                f"OpenRouter found no safe navigation action: {plan.reason}"
                             )
                         action = plan.actions[0]
                         if action.action == "login":
@@ -131,21 +133,21 @@ def _fill_for_review(
                             credentials = accounts.get(host) or accounts.get(host.removeprefix("www."))
                             if credentials is None:
                                 raise FormAutomationError(
-                                    f"Gemini identified a required provider login, but no credentials "
+                                f"OpenRouter identified a required provider login, but no credentials "
                                     f"exist in accounts.yaml for {host or 'the current provider'}"
                                 )
                             login_to_provider(page, credentials)
                         else:
                             apply_navigation_plan(page, plan)
-                        gemini_reasons.append(plan.reason)
-                    except (GeminiPlanningError, FormAutomationError) as gemini_error:
+                        model_reasons.append(plan.reason)
+                    except (OpenRouterPlanningError, FormAutomationError) as model_error:
                         raise FormAutomationError(
                             f"generic form matching failed: {generic_reason}; "
-                            f"Gemini fallback failed: {gemini_error}"
-                        ) from gemini_error
+                            f"OpenRouter fallback failed: {model_error}"
+                        ) from model_error
             page.screenshot(path=str(temporary_path), full_page=True)
             temporary_path.replace(screenshot_path)
-            return screenshot_key, filled, "; ".join(gemini_reasons) or None
+            return screenshot_key, filled, "; ".join(model_reasons) or None
         finally:
             page.close()
             context.close()
@@ -157,7 +159,7 @@ def process_once(
     screenshot_directory: Path,
     *,
     profile: ApplicantProfile | None = None,
-    planner: GeminiFormPlanner | None = None,
+    planner: OpenRouterFormPlanner | None = None,
     accounts: dict[str, AccountCredentials] | None = None,
     lease_seconds: int = 1_800,
     max_attempts: int = 3,
@@ -172,19 +174,20 @@ def process_once(
         if profile is None:
             screenshot_key = _capture_for_review(work, screenshot_directory)
             fields: list[str] = []
-            gemini_reason = None
+            model_reason = None
         else:
             if planner is None:
-                raise RuntimeError("Gemini planner was not configured for form processing")
-            screenshot_key, fields, gemini_reason = _fill_for_review(
+                raise RuntimeError("OpenRouter planner was not configured for form processing")
+            screenshot_key, fields, model_reason = _fill_for_review(
                 work, screenshot_directory, profile, planner, accounts or {}
             )
         database.mark_application_awaiting_review(work, screenshot_key)
         logging.info(
             "Provider listing ready for review | title=%r | provider_url=%s | screenshot=%s "
-            "| fields=%s | gemini_navigation_reasons=%r",
+            "| rooms=%s | fields=%s | model_navigation_reasons=%r",
             work.title or "(no title)", work.resolved_url, screenshot_key,
-            ",".join(fields) or "none", gemini_reason,
+            work.room_count if work.room_count is not None else "unknown",
+            ",".join(fields) or "none", model_reason,
         )
         return 1
     except Exception as error:
@@ -225,7 +228,7 @@ def main() -> int:
     screenshot_directory = Path(args.screenshots_dir)
     accounts_path = Path(args.accounts) if args.accounts else Path(args.config).with_name("accounts.yaml")
     accounts = load_accounts(accounts_path)
-    planner = GeminiFormPlanner(settings.gemini_api_key, settings.gemini_model)
+    planner = OpenRouterFormPlanner(settings.openrouter_api_key, settings.openrouter_model)
     try:
         while True:
             handled = process_once(

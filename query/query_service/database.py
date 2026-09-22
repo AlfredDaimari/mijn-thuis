@@ -140,6 +140,10 @@ def _migrate_seen_emails(connection: sqlite3.Connection) -> None:
     connection.execute("UPDATE resolved_listings SET id = rowid WHERE id IS NULL")
     connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS resolved_listings_id_idx ON resolved_listings (id)")
     connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS resolved_listings_url_idx ON resolved_listings (resolved_url)")
+    for table in ("listings", "resolved_listings", "applications"):
+        columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if "room_count" not in columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN room_count INTEGER")
 
 
 class EmailDatabase:
@@ -216,6 +220,7 @@ class QueuedListing:
     url: str
     title: str | None
     source_subject: str
+    room_count: int | None = None
 
 
 class ListingDatabase:
@@ -227,6 +232,7 @@ class ListingDatabase:
             url TEXT NOT NULL,
             title TEXT,
             source_subject TEXT NOT NULL,
+            room_count INTEGER CHECK (room_count IS NULL OR room_count > 0),
             is_read INTEGER NOT NULL DEFAULT 0 CHECK (is_read IN (0, 1)),
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             read_at TEXT,
@@ -240,13 +246,13 @@ class ListingDatabase:
     def __init__(self, database_path: str | Path) -> None:
         self._database = SQLiteDatabase(database_path, self._SCHEMA)
 
-    def add_if_new(self, source_signature: str, url: str, title: str | None, source_subject: str) -> bool:
+    def add_if_new(self, source_signature: str, url: str, title: str | None, source_subject: str, room_count: int | None = None) -> bool:
         def insert(connection: sqlite3.Connection) -> bool:
             cursor = connection.execute(
                 """INSERT OR IGNORE INTO listings
-                   (source_signature, url, title, source_subject, is_read)
-                   VALUES (?, ?, ?, ?, 0)""",
-                (source_signature, url, title, source_subject),
+                   (source_signature, url, title, source_subject, room_count, is_read)
+                   VALUES (?, ?, ?, ?, ?, 0)""",
+                (source_signature, url, title, source_subject, room_count),
             )
             return cursor.rowcount == 1
 
@@ -257,7 +263,7 @@ class ListingDatabase:
             lambda connection: [
                 QueuedListing(*row)
                 for row in connection.execute(
-                    """SELECT source_signature, url, title, source_subject FROM listings
+                    """SELECT source_signature, url, title, source_subject, room_count FROM listings
                        WHERE is_read = 0 ORDER BY source_signature, url LIMIT ?""",
                     (limit,),
                 ).fetchall()
@@ -288,6 +294,7 @@ class ResolvedListing:
     resolved_url: str
     title: str | None
     source_subject: str
+    room_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -313,6 +320,7 @@ class ApplicationWork:
     resolved_url: str
     title: str | None
     source_subject: str
+    room_count: int | None
     attempt_count: int
 
 
@@ -326,6 +334,7 @@ class ResolvedListingDatabase:
             resolved_url TEXT NOT NULL,
             title TEXT,
             source_subject TEXT NOT NULL,
+            room_count INTEGER CHECK (room_count IS NULL OR room_count > 0),
             is_read INTEGER NOT NULL DEFAULT 0 CHECK (is_read IN (0, 1)),
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             read_at TEXT,
@@ -344,9 +353,9 @@ class ResolvedListingDatabase:
         def insert(connection: sqlite3.Connection) -> bool:
             cursor = connection.execute(
                 """INSERT OR IGNORE INTO resolved_listings
-                   (id, source_signature, source_url, resolved_url, title, source_subject, is_read)
-                   VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM resolved_listings), ?, ?, ?, ?, ?, 0)""",
-                (listing.source_signature, listing.url, resolved_url, listing.title, listing.source_subject),
+                   (id, source_signature, source_url, resolved_url, title, source_subject, room_count, is_read)
+                   VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM resolved_listings), ?, ?, ?, ?, ?, ?, 0)""",
+                (listing.source_signature, listing.url, resolved_url, listing.title, listing.source_subject, listing.room_count),
             )
             return cursor.rowcount == 1
 
@@ -357,7 +366,7 @@ class ResolvedListingDatabase:
             lambda connection: [
                 ResolvedListing(*row)
                 for row in connection.execute(
-                    """SELECT source_signature, source_url, resolved_url, title, source_subject
+                    """SELECT source_signature, source_url, resolved_url, title, source_subject, room_count
                        FROM resolved_listings WHERE is_read = 0
                        ORDER BY source_signature, source_url, resolved_url LIMIT ?""",
                     (limit,),
@@ -396,6 +405,7 @@ class PipelineDatabase:
             resolved_url TEXT NOT NULL,
             title TEXT,
             source_subject TEXT NOT NULL,
+            room_count INTEGER CHECK (room_count IS NULL OR room_count > 0),
             status TEXT NOT NULL CHECK (status IN (
                 'pending', 'processing', 'awaiting_review', 'submitted', 'failed'
             )),
@@ -470,20 +480,20 @@ class PipelineDatabase:
         )
 
     def add_listings_and_mark_email_read(
-        self, email: PendingEmail, listings: list[tuple[str, str | None]]
+        self, email: PendingEmail, listings: list[tuple[str, str | None, int | None]]
     ) -> list[QueuedListing]:
         """Atomically queue extracted listings and acknowledge their email."""
         def write(connection: sqlite3.Connection) -> list[QueuedListing]:
             added: list[QueuedListing] = []
-            for url, title in listings:
+            for url, title, room_count in listings:
                 cursor = connection.execute(
                     """INSERT OR IGNORE INTO listings
-                       (source_signature, url, title, source_subject, is_read)
-                       VALUES (?, ?, ?, ?, 0)""",
-                    (email.signature, url, title, email.subject),
+                       (source_signature, url, title, source_subject, room_count, is_read)
+                       VALUES (?, ?, ?, ?, ?, 0)""",
+                    (email.signature, url, title, email.subject, room_count),
                 )
                 if cursor.rowcount == 1:
-                    added.append(QueuedListing(email.signature, url, title, email.subject))
+                    added.append(QueuedListing(email.signature, url, title, email.subject, room_count))
             connection.execute(
                 """UPDATE seen_emails
                    SET is_read = 1, read_at = CURRENT_TIMESTAMP, extraction_error = NULL
@@ -494,13 +504,13 @@ class PipelineDatabase:
 
         return self._database.write(write)
 
-    def add_listing_if_new(self, source_signature: str, url: str, title: str | None, source_subject: str) -> bool:
+    def add_listing_if_new(self, source_signature: str, url: str, title: str | None, source_subject: str, room_count: int | None = None) -> bool:
         def insert(connection: sqlite3.Connection) -> bool:
             cursor = connection.execute(
                 """INSERT OR IGNORE INTO listings
-                   (source_signature, url, title, source_subject, is_read)
-                   VALUES (?, ?, ?, ?, 0)""",
-                (source_signature, url, title, source_subject),
+                   (source_signature, url, title, source_subject, room_count, is_read)
+                   VALUES (?, ?, ?, ?, ?, 0)""",
+                (source_signature, url, title, source_subject, room_count),
             )
             return cursor.rowcount == 1
 
@@ -511,7 +521,7 @@ class PipelineDatabase:
             lambda connection: [
                 QueuedListing(*row)
                 for row in connection.execute(
-                    """SELECT source_signature, url, title, source_subject FROM listings
+                    """SELECT source_signature, url, title, source_subject, room_count FROM listings
                        WHERE is_read = 0 ORDER BY source_signature, url LIMIT ?""",
                     (limit,),
                 ).fetchall()
@@ -539,9 +549,9 @@ class PipelineDatabase:
         def write(connection: sqlite3.Connection) -> bool:
             cursor = connection.execute(
                 """INSERT OR IGNORE INTO resolved_listings
-                   (source_signature, source_url, resolved_url, title, source_subject, is_read)
-                   VALUES (?, ?, ?, ?, ?, 0)""",
-                (listing.source_signature, listing.url, resolved_url, listing.title, listing.source_subject),
+                   (source_signature, source_url, resolved_url, title, source_subject, room_count, is_read)
+                   VALUES (?, ?, ?, ?, ?, ?, 0)""",
+                (listing.source_signature, listing.url, resolved_url, listing.title, listing.source_subject, listing.room_count),
             )
             connection.execute(
                 """UPDATE listings SET is_read = 1, read_at = CURRENT_TIMESTAMP
@@ -572,7 +582,7 @@ class PipelineDatabase:
             lambda connection: [
                 ResolvedListing(*row)
                 for row in connection.execute(
-                    """SELECT source_signature, source_url, resolved_url, title, source_subject
+                    """SELECT source_signature, source_url, resolved_url, title, source_subject, room_count
                        FROM resolved_listings WHERE is_read = 0
                        ORDER BY source_signature, source_url, resolved_url LIMIT ?""",
                     (limit,),
@@ -642,7 +652,7 @@ class PipelineDatabase:
                      AND lease_expires_at <= CURRENT_TIMESTAMP"""
             )
             existing = connection.execute(
-                """SELECT source_signature, source_url, resolved_url, title, source_subject,
+                """SELECT source_signature, source_url, resolved_url, title, source_subject, room_count,
                           attempt_count
                    FROM applications
                    WHERE status IN ('pending', 'failed') AND attempt_count < ?
@@ -659,10 +669,10 @@ class PipelineDatabase:
                        WHERE source_signature = ? AND source_url = ? AND resolved_url = ?""",
                     (lease_modifier, existing[0], existing[1], existing[2]),
                 )
-                return ApplicationWork(*existing[:5], existing[5] + 1)
+                return ApplicationWork(*existing[:6], existing[6] + 1)
 
             resolved = connection.execute(
-                """SELECT source_signature, source_url, resolved_url, title, source_subject
+                """SELECT source_signature, source_url, resolved_url, title, source_subject, room_count
                    FROM resolved_listings WHERE is_read = 0
                    ORDER BY source_signature, source_url, resolved_url LIMIT 1"""
             ).fetchone()
@@ -670,9 +680,9 @@ class PipelineDatabase:
                 return None
             connection.execute(
                 """INSERT INTO applications
-                   (source_signature, source_url, resolved_url, title, source_subject,
+                   (source_signature, source_url, resolved_url, title, source_subject, room_count,
                     status, lease_expires_at, attempt_count, claimed_at)
-                   VALUES (?, ?, ?, ?, ?, 'processing', datetime('now', ?), 1, CURRENT_TIMESTAMP)""",
+                   VALUES (?, ?, ?, ?, ?, ?, 'processing', datetime('now', ?), 1, CURRENT_TIMESTAMP)""",
                 (*resolved, lease_modifier),
             )
             connection.execute(

@@ -28,14 +28,15 @@ def process_once(database: PipelineDatabase) -> int:
             continue
 
         queued = database.add_listings_and_mark_email_read(
-            email, [(listing.url, listing.title) for listing in listings]
+            email, [(listing.url, listing.title, listing.room_count) for listing in listings]
         )
         for listing in queued:
             logging.info(
-                "Queued Stekkies listing | message_id=%s | subject=%r | title=%r | url=%s",
+                "Queued Stekkies listing | message_id=%s | subject=%r | title=%r | rooms=%s | url=%s",
                 email.message_id or "unknown",
                 email.subject or "(no subject)",
                 listing.title,
+                listing.room_count if listing.room_count is not None else "unknown",
                 listing.url,
             )
         handled += 1

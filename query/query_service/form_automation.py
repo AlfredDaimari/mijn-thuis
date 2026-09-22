@@ -1,11 +1,11 @@
-"""No-submit generic form matching and safe Gemini-directed navigation."""
+"""No-submit generic form matching and safe OpenRouter-directed navigation."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from .config import AccountCredentials, ApplicantProfile
-from .gemini_form_planner import NavigationPlan
+from .openrouter_form_planner import NavigationPlan
 
 
 class FormAutomationError(RuntimeError):
@@ -66,7 +66,7 @@ def _contact_form(page: Any) -> Any:
     raise FormAutomationError("no visible contact form")
 
 
-def fill_generic_form(page: Any, profile: ApplicantProfile) -> list[str]:
+def fill_generic_form(page: Any, profile: ApplicantProfile, message: str) -> list[str]:
     """Fill recognised visible fields without submitting or changing consent."""
     form = _contact_form(page)
     fields = form.locator("input, textarea").evaluate_all(
@@ -84,7 +84,7 @@ def fill_generic_form(page: Any, profile: ApplicantProfile) -> list[str]:
         value = (
             f"{profile.first_name} {profile.last_name}"
             if kind == "full_name"
-            else getattr(profile, kind)
+            else message if kind == "message" else getattr(profile, kind)
         )
         form.locator("input, textarea").nth(field["index"]).fill(value)
         filled.append(kind)
@@ -99,24 +99,24 @@ def apply_navigation_plan(page: Any, plan: NavigationPlan) -> int:
     clicked = 0
     for action in plan.actions:
         if action.action != "click":
-            raise FormAutomationError("Gemini requested a non-navigation action")
+            raise FormAutomationError("OpenRouter requested a non-navigation action")
         if action.candidate_index < 0 or action.candidate_index >= controls.count():
-            raise FormAutomationError(f"Gemini chose unavailable control index {action.candidate_index}")
+            raise FormAutomationError(f"OpenRouter chose unavailable control index {action.candidate_index}")
         control = controls.nth(action.candidate_index)
         if not control.is_visible():
-            raise FormAutomationError(f"Gemini chose hidden control index {action.candidate_index}")
+            raise FormAutomationError(f"OpenRouter chose hidden control index {action.candidate_index}")
         text = " ".join(
             filter(None, [control.inner_text(), control.get_attribute("aria-label") or ""])
         ).lower()
         if any(word in text for word in _UNSAFE_NAVIGATION_WORDS):
-            raise FormAutomationError("Gemini chose a prohibited navigation control")
+            raise FormAutomationError("OpenRouter chose a prohibited navigation control")
         if not any(word in text for word in _SAFE_NAVIGATION_WORDS):
-            raise FormAutomationError("Gemini chose a control that is not contact/application navigation")
+            raise FormAutomationError("OpenRouter chose a control that is not contact/application navigation")
         control.click(timeout=10_000)
         page.wait_for_load_state("domcontentloaded", timeout=10_000)
         clicked += 1
     if not clicked:
-        raise FormAutomationError(f"Gemini found no safe navigation action: {plan.reason}")
+        raise FormAutomationError(f"OpenRouter found no safe navigation action: {plan.reason}")
     return clicked
 
 

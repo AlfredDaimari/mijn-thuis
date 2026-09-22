@@ -41,22 +41,26 @@ def test_load_settings_keeps_configured_pipeline_database_path(tmp_path) -> None
     assert settings.database == "state/pipeline.sqlite3"
 
 
-def test_load_settings_reads_optional_applicant_and_gemini_settings(tmp_path) -> None:
-    """Form settings stay optional for the mail-only worker but load when supplied."""
+def test_load_settings_reads_optional_applicant_messages_and_openrouter_settings(tmp_path) -> None:
+    """Two applicant messages and OpenRouter settings load without exposing secrets."""
     values = tmp_path / "values.yaml"
     values.write_text(
         "email: person@yahoo.com\npassword: app-password\n"
-        "gemini_api_key: test-key\ngemini_model: gemini-2.5-flash\n"
+        "openrouter_api_key: test-key\nopenrouter_model: ~openai/gpt-luna-latest\n"
         "applicant:\n  first_name: Ada\n  last_name: Lovelace\n"
-        "  phone: '+31600000000'\n  email: ada@example.com\n  message: Interested\n"
+        "  phone: '+31600000000'\n  email: ada@example.com\n"
+        "  message_single_person: Interested on my own\n"
+        "  message_two_person: Interested together\n"
     )
 
     settings = load_settings(values)
 
     assert settings.applicant is not None
     assert settings.applicant.first_name == "Ada"
-    assert settings.gemini_api_key == "test-key"
-    assert settings.gemini_model == "gemini-2.5-flash"
+    assert settings.applicant.message_for_rooms(1) == "Interested on my own"
+    assert settings.applicant.message_for_rooms(2) == "Interested together"
+    assert settings.openrouter_api_key == "test-key"
+    assert settings.openrouter_model == "~openai/gpt-luna-latest"
 
 
 def test_load_accounts_reads_only_the_configured_provider_credentials(tmp_path) -> None:

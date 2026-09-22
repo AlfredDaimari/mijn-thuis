@@ -46,6 +46,25 @@ def test_concurrent_duplicate_inserts_create_exactly_one_email(tmp_path) -> None
     assert len(database.unread_emails()) == 1
 
 
+def test_room_count_flows_from_listing_to_resolved_and_application_work(tmp_path) -> None:
+    """A provider application receives the room count extracted by the processor."""
+    database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
+    database.add_listing_if_new(
+        "email-1", "https://stekkies.test/1", "View match: 3-kamerwoning", "Listings", room_count=3
+    )
+    listing = database.unread_listings()[0]
+
+    assert database.add_resolved_listing_and_mark_source_read(
+        listing, "https://provider.test/home/42"
+    )
+    assert database.unread_resolved_listings()[0].room_count == 3
+
+    application = database.claim_next_application()
+
+    assert application is not None
+    assert application.room_count == 3
+
+
 def test_poller_writes_while_processor_reads_without_losing_emails(tmp_path) -> None:
     """WAL lets one poller write while one processor drains the same queue."""
     database = PipelineDatabase(tmp_path / "pipeline.sqlite3")

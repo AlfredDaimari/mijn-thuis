@@ -1,7 +1,7 @@
-"""Constrained Gemini 2.5 Flash planning for unsupported provider forms.
+"""Constrained OpenRouter planning for unsupported provider forms.
 
-Gemini receives no cookies, credentials, applicant values, or full page HTML.
-It returns only a tiny typed plan; Playwright validates and executes it.
+The selected OpenRouter model receives no cookies, credentials, applicant values,
+or full page HTML. It returns a tiny typed plan; Playwright validates it.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 
-class GeminiPlanningError(RuntimeError):
+class OpenRouterPlanningError(RuntimeError):
     """A safe, human-readable explanation for a failed fallback plan."""
 
 
@@ -61,7 +61,7 @@ form values. This worker fills a form for review but does not submit it."""
 
 
 def planning_input(url: str, generic_failure_reason: str, candidates: list[dict[str, Any]]) -> str:
-    """Build the redacted Gemini input, including why generic matching failed."""
+    """Build a redacted model input, including why generic matching failed."""
     return json.dumps(
         {
             "provider_host": (urlparse(url).hostname or "unknown").lower(),
@@ -73,11 +73,15 @@ def planning_input(url: str, generic_failure_reason: str, candidates: list[dict[
     )
 
 
-class GeminiFormPlanner:
-    """Call Gemini only after generic matching fails, using typed JSON output."""
+class OpenRouterFormPlanner:
+    """Use OpenRouter's OpenAI-compatible API after generic matching fails."""
 
     def __init__(
-        self, api_key: str | None, model: str = "gemini-2.5-flash", *, client: Any | None = None
+        self,
+        api_key: str | None,
+        model: str = "~openai/gpt-luna-latest",
+        *,
+        client: Any | None = None,
     ) -> None:
         self._api_key = api_key
         self._model = model
@@ -87,33 +91,38 @@ class GeminiFormPlanner:
         self, url: str, generic_failure_reason: str, candidates: list[dict[str, Any]]
     ) -> NavigationPlan:
         if not self._api_key:
-            raise GeminiPlanningError(
-                "Gemini fallback unavailable: gemini_api_key is not configured; "
+            raise OpenRouterPlanningError(
+                "OpenRouter fallback unavailable: openrouter_api_key is not configured; "
                 f"generic failure: {generic_failure_reason}"
             )
         try:
             if self._client is None:
-                from google import genai
-                from google.genai import types
+                from openai import OpenAI
 
-                self._client = genai.Client(api_key=self._api_key)
-                config: Any = types.GenerateContentConfig(
-                    response_mime_type="application/json", response_schema=_PLAN_SCHEMA
+                self._client = OpenAI(
+                    api_key=self._api_key,
+                    base_url="https://openrouter.ai/api/v1",
                 )
-            else:
-                config = {
-                    "response_mime_type": "application/json",
-                    "response_schema": _PLAN_SCHEMA,
-                }
-            response = self._client.models.generate_content(
+            response = self._client.chat.completions.create(
                 model=self._model,
-                contents=f"{_INSTRUCTIONS}\n\n{planning_input(url, generic_failure_reason, candidates)}",
-                config=config,
+                messages=[
+                    {"role": "system", "content": _INSTRUCTIONS},
+                    {"role": "user", "content": planning_input(url, generic_failure_reason, candidates)},
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "provider_navigation_plan",
+                        "strict": True,
+                        "schema": _PLAN_SCHEMA,
+                    },
+                },
+                extra_body={"provider": {"require_parameters": True}},
             )
-            payload = json.loads(response.text)
+            payload = json.loads(response.choices[0].message.content)
         except Exception as error:
-            raise GeminiPlanningError(
-                f"Gemini fallback request failed; generic failure: {generic_failure_reason}; "
+            raise OpenRouterPlanningError(
+                f"OpenRouter fallback request failed; generic failure: {generic_failure_reason}; "
                 f"detail: {error}"
             ) from error
 
@@ -127,7 +136,7 @@ class GeminiFormPlanner:
                 raise ValueError("invalid plan action or reason")
             return NavigationPlan(reason=reason, actions=actions)
         except (KeyError, TypeError, ValueError) as error:
-            raise GeminiPlanningError(
-                f"Gemini returned an invalid navigation plan; generic failure: "
+            raise OpenRouterPlanningError(
+                f"OpenRouter returned an invalid navigation plan; generic failure: "
                 f"{generic_failure_reason}; detail: {error}"
             ) from error

@@ -27,6 +27,7 @@ def test_extract_listings_keeps_the_view_match_anchor_and_title() -> None:
 
     assert listings[0].url == "https://houses.test/42"
     assert listings[0].title == "View match: Two-bedroom home"
+    assert listings[0].room_count == 2
 
 
 @pytest.mark.unit
@@ -63,6 +64,19 @@ def test_processor_queues_extracted_listing_then_marks_email_read(tmp_path) -> N
     queued_listings = database.unread_listings()
     assert len(queued_listings) == 1
     assert queued_listings[0].url == "https://houses.test/42"
+
+
+@pytest.mark.service
+def test_processor_persists_extracted_room_count_through_the_listing_queue(tmp_path) -> None:
+    """A two-room label in the Stekkies link becomes durable queue metadata."""
+    database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
+    database.remember_if_new(
+        "signature", "<id>", "alerts@stekkies.com", "Listings",
+        raw_email('<a href="https://houses.test/42">View match: 2-kamerwoning</a>'),
+    )
+
+    assert process_once(database) == 1
+    assert database.unread_listings()[0].room_count == 2
 
     database.mark_listing_read("signature", "https://houses.test/42")
     assert database.unread_listings() == []

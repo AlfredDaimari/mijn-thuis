@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 from .config import load_settings
 from .database import PipelineDatabase
+from .extractor import extract_room_count
 
 
 DEFAULT_TIMEOUT_MS = 30_000
@@ -69,6 +70,15 @@ def _page_diagnostics(page) -> tuple[str, str]:
     except Exception:
         page_title = "unavailable"
     return current_url, page_title
+
+
+def _destination_room_count(destination, fallback: int | None) -> int | None:
+    """Prefer visible provider-page data, retaining email extraction as a fallback."""
+    try:
+        visible_text = destination.locator("body").inner_text(timeout=5_000)
+    except Exception:
+        return fallback
+    return extract_room_count(visible_text) or fallback
 
 
 def _view_listing(page, source_url: str, attempt: MutableMapping[str, str]):
@@ -171,10 +181,16 @@ def resolve_once(
                             "the View listing control did not leave Stekkies; "
                             "the session cookie may be expired or incomplete"
                         )
+                    room_count = _destination_room_count(destination, item.room_count)
+                    if room_count != item.room_count:
+                        item = type(item)(
+                            item.source_signature, item.url, item.title, item.source_subject, room_count
+                        )
                     database.add_resolved_listing_and_mark_source_read(item, destination.url)
                     logging.info(
-                        "Resolved listing URL | title=%s | source_url=%s | resolved_url=%s",
+                        "Resolved listing URL | title=%s | rooms=%s | source_url=%s | resolved_url=%s",
                         item.title or "(no title)",
+                        item.room_count if item.room_count is not None else "unknown",
                         item.url,
                         destination.url,
                     )

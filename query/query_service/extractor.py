@@ -16,6 +16,7 @@ from .yahoo import URL_PATTERN, _body_text
 class Listing:
     url: str
     title: str | None
+    room_count: int | None = None
 
 
 class _AnchorParser(HTMLParser):
@@ -77,6 +78,28 @@ def _is_listing_button(title: str | None) -> bool:
     return "view match" in normalized or "view listing" in normalized
 
 
+_ROOM_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "een": 1, "twee": 2, "drie": 3, "vier": 4, "vijf": 5,
+}
+_ROOM_PATTERN = re.compile(
+    r"\b(?:(?P<number>\d{1,2})|(?P<word>one|two|three|four|five|een|twee|drie|vier|vijf))"
+    r"\s*(?:-|\s)?(?:kamer(?:woning|appartement)?|kamers|room(?:s)?|bedroom(?:s)?)\b",
+    re.IGNORECASE,
+)
+
+
+def extract_room_count(text: str | None) -> int | None:
+    """Return a plausible Dutch or English room count from visible listing text."""
+    if not text:
+        return None
+    match = _ROOM_PATTERN.search(text)
+    if not match:
+        return None
+    room_count = int(match.group("number")) if match.group("number") else _ROOM_WORDS[match.group("word").lower()]
+    return room_count if 1 <= room_count <= 20 else None
+
+
 def extract_listings(raw_message: bytes) -> list[Listing]:
     """Extract unique HTTP(S) listing links and optional anchor titles from an email."""
     message: EmailMessage = BytesParser(policy=policy.default).parsebytes(raw_message)
@@ -93,5 +116,8 @@ def extract_listings(raw_message: bytes) -> list[Listing]:
     for listing in found:
         normalized_url = unescape(listing.url)
         if _is_listing_url(normalized_url):
-            unique.setdefault(normalized_url, Listing(normalized_url, listing.title))
+            unique.setdefault(
+                normalized_url,
+                Listing(normalized_url, listing.title, extract_room_count(listing.title)),
+            )
     return list(unique.values())
