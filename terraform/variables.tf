@@ -32,3 +32,9 @@ variable "ssh_public_key_path" {
   description = "Absolute or Terraform-relative path to the public SSH key (.pub) to pre-install on the VPS."
   type        = string
 }
+
+variable "require_public_ipv4" {
+  description = "Confirms that the selected OVH VPS plan includes its bundled public IPv4 address."
+  type        = bool
+  default     = true
+}

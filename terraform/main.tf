@@ -12,8 +12,9 @@ terraform {
 provider "ovh" {}
 
 # Orders one OVHcloud VPS, rather than a Public Cloud instance. The VPS product
-# includes its normal public network access; no Public Cloud project, network,
-# or SSH-key resource is required.
+# includes one public IPv4 in its normal network access. This is the cheapest
+# IPv4 option because it is bundled with the selected VPS rather than ordered
+# as a separate Public Cloud floating-IP/network resource.
 resource "ovh_vps" "vm" {
   display_name   = var.instance_name
   ovh_subsidiary = var.ovh_subsidiary
@@ -38,10 +39,17 @@ resource "ovh_vps" "vm" {
       }
     ]
   }]
+
+  lifecycle {
+    precondition {
+      condition     = var.require_public_ipv4
+      error_message = "Choose an OVH VPS plan that includes its bundled public IPv4 address."
+    }
+  }
 }
 
 output "vps_service_name" {
-  description = "OVHcloud VPS service name. Use the assigned public IPv4 from the OVHcloud Control Panel in Ansible inventory."
+  description = "OVHcloud VPS service name. Use its bundled public IPv4 from the OVHcloud Control Panel in Ansible inventory."
   value       = ovh_vps.vm.name
 }
 
