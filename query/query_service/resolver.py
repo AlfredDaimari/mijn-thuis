@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 from .config import load_settings
 from .database import PipelineDatabase
-from .extractor import extract_room_count
+from .extractor import ListingDetails, extract_listing_details
 
 
 DEFAULT_TIMEOUT_MS = 30_000
@@ -72,13 +72,25 @@ def _page_diagnostics(page) -> tuple[str, str]:
     return current_url, page_title
 
 
-def _destination_room_count(destination, fallback: int | None) -> int | None:
-    """Prefer visible provider-page data, retaining email extraction as a fallback."""
+def _destination_listing_details(destination, fallback_rooms: int | None) -> ListingDetails:
+    """Prefer explicit provider facts while retaining email room extraction."""
+    provider_title = None
+    try:
+        provider_title = destination.title()
+    except Exception:
+        pass
     try:
         visible_text = destination.locator("body").inner_text(timeout=5_000)
     except Exception:
-        return fallback
-    return extract_room_count(visible_text) or fallback
+        return ListingDetails(provider_title=provider_title, room_count=fallback_rooms)
+    details = extract_listing_details(visible_text, provider_title)
+    return ListingDetails(
+        provider_title=details.provider_title,
+        location=details.location,
+        monthly_rent_cents=details.monthly_rent_cents,
+        area_m2=details.area_m2,
+        room_count=details.room_count or fallback_rooms,
+    )
 
 
 def _view_listing(page, source_url: str, attempt: MutableMapping[str, str]):
@@ -181,15 +193,19 @@ def resolve_once(
                             "the View listing control did not leave Stekkies; "
                             "the session cookie may be expired or incomplete"
                         )
-                    room_count = _destination_room_count(destination, item.room_count)
+                    details = _destination_listing_details(destination, item.room_count)
+                    room_count = details.room_count
                     if room_count != item.room_count:
                         item = type(item)(
                             item.source_signature, item.url, item.title, item.source_subject, room_count
                         )
-                    database.add_resolved_listing_and_mark_source_read(item, destination.url)
+                    database.add_resolved_listing_and_mark_source_read(item, destination.url, details)
                     logging.info(
-                        "Resolved listing URL | title=%s | rooms=%s | source_url=%s | resolved_url=%s",
+                        "Resolved listing URL | title=%s | location=%s | rent_cents=%s | area_m2=%s | rooms=%s | source_url=%s | resolved_url=%s",
                         item.title or "(no title)",
+                        details.location or "unknown",
+                        details.monthly_rent_cents if details.monthly_rent_cents is not None else "unknown",
+                        details.area_m2 if details.area_m2 is not None else "unknown",
                         item.room_count if item.room_count is not None else "unknown",
                         item.url,
                         destination.url,
@@ -197,6 +213,13 @@ def resolve_once(
                     resolved += 1
                 except Exception as error:
                     current_url, page_title = _page_diagnostics(page)
+                    database.record_pipeline_error(
+                        stage="resolver",
+                        message=str(error),
+                        source_signature=item.source_signature,
+                        source_url=item.url,
+                        resolved_url=attempt.get("final_url"),
+                    )
                     logging.exception(
                         "Could not resolve Stekkies listing; leaving it unread for retry "
                         "| title=%s | source_url=%s | step=%s | action_role=%s "

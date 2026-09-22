@@ -75,6 +75,10 @@ def test_provider_worker_captures_evidence_then_stops_for_review(tmp_path, monke
         "https://www.stekkies.com/redirect/1",
         "https://provider.example/listing/1",
     ) == "awaiting_review"
+    screenshots = database.screenshots_for_resolved_url("https://provider.example/listing/1")
+    assert [(item.stage, item.nginx_path) for item in screenshots] == [
+        ("capture", "/screenshots/provider-listing.png")
+    ]
 
 
 @pytest.mark.service
@@ -109,3 +113,6 @@ def test_form_failure_persists_generic_and_openrouter_reason_in_application_erro
     assert error is not None
     assert "no visible contact form" in error
     assert "OpenRouter fallback failed" in error
+    failures = database.recent_pipeline_errors()
+    assert failures[0].stage == "application_worker"
+    assert "no visible contact form" in failures[0].message

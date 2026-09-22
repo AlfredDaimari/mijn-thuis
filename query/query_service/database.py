@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from hashlib import sha256
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 from urllib.parse import urlparse
+
+from .extractor import ListingDetails
 
 
 Result = TypeVar("Result")
@@ -140,11 +143,44 @@ def _migrate_seen_emails(connection: sqlite3.Connection) -> None:
     connection.execute("UPDATE resolved_listings SET id = rowid WHERE id IS NULL")
     connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS resolved_listings_id_idx ON resolved_listings (id)")
     connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS resolved_listings_url_idx ON resolved_listings (resolved_url)")
+    # These deterministic sort indexes are the backend contract for the
+    # future cursor-paginated dashboard endpoints.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS resolved_listings_created_id_idx "
+        "ON resolved_listings (created_at DESC, id DESC)"
+    )
     connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS applications_resolved_url_idx ON applications (resolved_url)")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS applications_status_completed_url_idx "
+        "ON applications (status, completed_at DESC, resolved_url)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS application_screenshots_resolved_captured_idx "
+        "ON application_screenshots (resolved_listing_id, captured_at, id)"
+    )
     for table in ("listings", "resolved_listings", "applications"):
         columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
         if "room_count" not in columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN room_count INTEGER")
+
+    # ``applications.screenshot_key`` and the two old resolved-listing fields
+    # predate the screenshot catalogue. Retain them for backwards compatibility
+    # while copying actual Nginx-served application captures to the new table.
+    application_columns = {row[1] for row in connection.execute("PRAGMA table_info(applications)")}
+    if "screenshot_key" in application_columns:
+        for resolved_url, screenshot_key in connection.execute(
+            "SELECT resolved_url, screenshot_key FROM applications WHERE screenshot_key IS NOT NULL"
+        ):
+            row = connection.execute(
+                "SELECT id FROM resolved_listings WHERE resolved_url = ?", (resolved_url,)
+            ).fetchone()
+            if row is not None and "/" not in screenshot_key and "\\" not in screenshot_key:
+                connection.execute(
+                    """INSERT OR IGNORE INTO application_screenshots
+                       (resolved_listing_id, stage, nginx_path)
+                       VALUES (?, 'capture', ?)""",
+                    (row[0], f"/screenshots/{screenshot_key}"),
+                )
 
 
 class EmailDatabase:
@@ -305,6 +341,43 @@ class ResolvedCandidate:
 
 
 @dataclass(frozen=True)
+class StoredListingDetails:
+    """Provider facts available to the future frontend/API."""
+
+    resolved_listing_id: int
+    provider_title: str | None
+    location: str | None
+    monthly_rent_cents: int | None
+    area_m2: int | None
+    room_count: int | None
+
+
+@dataclass(frozen=True)
+class ApplicationScreenshot:
+    """An Nginx-relative image associated with one resolved listing."""
+
+    resolved_listing_id: int
+    stage: str
+    nginx_path: str
+    captured_at: str
+
+
+@dataclass(frozen=True)
+class PipelineError:
+    """A deduplicated, safe-to-display worker failure."""
+
+    error_key: str
+    stage: str
+    source_signature: str | None
+    source_url: str | None
+    resolved_url: str | None
+    message: str
+    occurrence_count: int
+    first_occurred_at: str
+    last_occurred_at: str
+
+
+@dataclass(frozen=True)
 class ProviderSource:
     host: str
     resolved_count: int
@@ -330,6 +403,7 @@ class ResolvedListingDatabase:
 
     _SCHEMA = """
         CREATE TABLE IF NOT EXISTS resolved_listings (
+            id INTEGER PRIMARY KEY,
             source_signature TEXT NOT NULL,
             source_url TEXT NOT NULL,
             resolved_url TEXT NOT NULL,
@@ -339,7 +413,7 @@ class ResolvedListingDatabase:
             is_read INTEGER NOT NULL DEFAULT 0 CHECK (is_read IN (0, 1)),
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             read_at TEXT,
-            PRIMARY KEY (source_signature, source_url, resolved_url),
+            UNIQUE (source_signature, source_url, resolved_url),
             UNIQUE (resolved_url)
         );
         -- Queue reads first filter unread work, then use the resolved listing ID.
@@ -426,6 +500,50 @@ class PipelineDatabase:
         -- database-enforced guard beyond resolved-listing deduplication.
         CREATE UNIQUE INDEX IF NOT EXISTS applications_resolved_url_idx
             ON applications (resolved_url);
+        -- Details are intentionally normalized rather than copied across each
+        -- queue. A future API joins them by the stable resolved-listing ID.
+        CREATE TABLE IF NOT EXISTS listing_details (
+            resolved_listing_id INTEGER PRIMARY KEY,
+            provider_title TEXT,
+            location TEXT,
+            monthly_rent_cents INTEGER CHECK (
+                monthly_rent_cents IS NULL OR monthly_rent_cents > 0
+            ),
+            area_m2 INTEGER CHECK (area_m2 IS NULL OR area_m2 > 0),
+            room_count INTEGER CHECK (room_count IS NULL OR room_count > 0),
+            extracted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (resolved_listing_id) REFERENCES resolved_listings(id)
+        );
+        CREATE TABLE IF NOT EXISTS application_screenshots (
+            id INTEGER PRIMARY KEY,
+            resolved_listing_id INTEGER NOT NULL,
+            stage TEXT NOT NULL CHECK (stage IN (
+                'capture', 'before_fill', 'after_fill', 'before_submit',
+                'after_submit', 'failure'
+            )),
+            nginx_path TEXT NOT NULL CHECK (nginx_path GLOB '/screenshots/*'),
+            captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (resolved_listing_id) REFERENCES resolved_listings(id),
+            UNIQUE (resolved_listing_id, stage)
+        );
+        CREATE INDEX IF NOT EXISTS application_screenshots_resolved_stage_idx
+            ON application_screenshots (resolved_listing_id, stage);
+        -- Workers record safe diagnostic context here in addition to their
+        -- queue-specific error fields. Repeated identical failures coalesce.
+        CREATE TABLE IF NOT EXISTS pipeline_errors (
+            error_key TEXT PRIMARY KEY,
+            stage TEXT NOT NULL,
+            source_signature TEXT,
+            source_url TEXT,
+            resolved_url TEXT,
+            message TEXT NOT NULL,
+            occurrence_count INTEGER NOT NULL DEFAULT 1,
+            first_occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS pipeline_errors_latest_idx
+            ON pipeline_errors (last_occurred_at DESC, error_key);
     """
 
     _SCHEMA = (
@@ -549,8 +667,13 @@ class PipelineDatabase:
             )
         )
 
-    def add_resolved_listing_and_mark_source_read(self, listing: QueuedListing, resolved_url: str) -> bool:
-        """Atomically persist a resolved URL and acknowledge its source listing."""
+    def add_resolved_listing_and_mark_source_read(
+        self,
+        listing: QueuedListing,
+        resolved_url: str,
+        details: ListingDetails | None = None,
+    ) -> bool:
+        """Atomically persist a provider URL, its facts, and source acknowledgement."""
         def write(connection: sqlite3.Connection) -> bool:
             cursor = connection.execute(
                 """INSERT OR IGNORE INTO resolved_listings
@@ -558,6 +681,30 @@ class PipelineDatabase:
                    VALUES (?, ?, ?, ?, ?, ?, 0)""",
                 (listing.source_signature, listing.url, resolved_url, listing.title, listing.source_subject, listing.room_count),
             )
+            resolved_id = connection.execute(
+                "SELECT id FROM resolved_listings WHERE resolved_url = ?", (resolved_url,)
+            ).fetchone()[0]
+            if details is not None:
+                connection.execute(
+                    """INSERT INTO listing_details
+                       (resolved_listing_id, provider_title, location, monthly_rent_cents, area_m2, room_count)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(resolved_listing_id) DO UPDATE SET
+                         provider_title = COALESCE(excluded.provider_title, listing_details.provider_title),
+                         location = COALESCE(excluded.location, listing_details.location),
+                         monthly_rent_cents = COALESCE(excluded.monthly_rent_cents, listing_details.monthly_rent_cents),
+                         area_m2 = COALESCE(excluded.area_m2, listing_details.area_m2),
+                         room_count = COALESCE(excluded.room_count, listing_details.room_count),
+                         updated_at = CURRENT_TIMESTAMP""",
+                    (
+                        resolved_id,
+                        details.provider_title,
+                        details.location,
+                        details.monthly_rent_cents,
+                        details.area_m2,
+                        details.room_count,
+                    ),
+                )
             connection.execute(
                 """UPDATE listings SET is_read = 1, read_at = CURRENT_TIMESTAMP
                    WHERE source_signature = ? AND url = ?""",
@@ -575,6 +722,25 @@ class PipelineDatabase:
             return cursor.rowcount == 1
 
         return self._database.write(write)
+
+    def listing_details_for_resolved_url(self, resolved_url: str) -> StoredListingDetails | None:
+        """Return normalized display details by the provider URL."""
+        return self._database.read(
+            lambda connection: (
+                StoredListingDetails(*row)
+                if (
+                    row := connection.execute(
+                        """SELECT d.resolved_listing_id, d.provider_title, d.location,
+                                  d.monthly_rent_cents, d.area_m2, d.room_count
+                           FROM listing_details AS d
+                           JOIN resolved_listings AS r ON r.id = d.resolved_listing_id
+                           WHERE r.resolved_url = ?""",
+                        (resolved_url,),
+                    ).fetchone()
+                )
+                else None
+            )
+        )
 
     def provider_source_tally(self) -> list[ProviderSource]:
         """Rank provider domains to decide which adapters deserve automation."""
@@ -601,10 +767,23 @@ class PipelineDatabase:
         ).fetchall()])
 
     def record_form_test_evidence(self, resolved_id: int, before: str | None, after: str | None) -> None:
-        self._database.write(lambda connection: connection.execute(
-            "UPDATE resolved_listings SET before_fill_screenshot_key = ?, after_fill_screenshot_key = ? WHERE id = ?",
-            (before, after, resolved_id),
-        ))
+        """Store dry-run evidence only when it lives in the Nginx screenshot tree."""
+        def write(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                "UPDATE resolved_listings SET before_fill_screenshot_key = ?, after_fill_screenshot_key = ? WHERE id = ?",
+                (before, after, resolved_id),
+            )
+            for stage, path in (("before_fill", before), ("after_fill", after)):
+                if path and path.startswith("/screenshots/"):
+                    connection.execute(
+                        """INSERT INTO application_screenshots (resolved_listing_id, stage, nginx_path)
+                           VALUES (?, ?, ?)
+                           ON CONFLICT(resolved_listing_id, stage) DO UPDATE SET
+                             nginx_path = excluded.nginx_path, captured_at = CURRENT_TIMESTAMP""",
+                        (resolved_id, stage, path),
+                    )
+
+        self._database.write(write)
 
     def clear_derived_queues_for_test_replay(self) -> None:
         """Clear disposable output queues while preserving captured raw emails."""
@@ -703,10 +882,101 @@ class PipelineDatabase:
 
         return self._database.write(claim)
 
-    def mark_application_awaiting_review(self, work: ApplicationWork, screenshot_key: str) -> None:
-        """Record browser evidence and stop before any irreversible submission."""
+    @staticmethod
+    def _nginx_screenshot_path(screenshot_key: str) -> str:
+        """Convert a worker-generated filename into the only public path shape."""
+        if not screenshot_key or "/" in screenshot_key or "\\" in screenshot_key:
+            raise ValueError("screenshot_key must be a filename, not a path")
+        return f"/screenshots/{screenshot_key}"
+
+    @staticmethod
+    def _record_pipeline_error_in_transaction(
+        connection: sqlite3.Connection,
+        *,
+        stage: str,
+        message: str,
+        source_signature: str | None = None,
+        source_url: str | None = None,
+        resolved_url: str | None = None,
+    ) -> None:
+        # No raw emails, cookies, passwords, or form values belong in this
+        # table. Bound the message in case a browser library emits a long trace.
+        message = message.strip()[:2_000] or "Unspecified worker failure"
+        fingerprint = "\n".join((stage, source_signature or "", source_url or "", resolved_url or "", message))
+        error_key = sha256(fingerprint.encode("utf-8")).hexdigest()
+        connection.execute(
+            """INSERT INTO pipeline_errors
+               (error_key, stage, source_signature, source_url, resolved_url, message)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(error_key) DO UPDATE SET
+                 occurrence_count = pipeline_errors.occurrence_count + 1,
+                 last_occurred_at = CURRENT_TIMESTAMP""",
+            (error_key, stage, source_signature, source_url, resolved_url, message),
+        )
+
+    def record_pipeline_error(
+        self,
+        *,
+        stage: str,
+        message: str,
+        source_signature: str | None = None,
+        source_url: str | None = None,
+        resolved_url: str | None = None,
+    ) -> None:
+        """Persist a deduplicated worker error for operational visibility."""
         self._database.write(
-            lambda connection: connection.execute(
+            lambda connection: self._record_pipeline_error_in_transaction(
+                connection,
+                stage=stage,
+                message=message,
+                source_signature=source_signature,
+                source_url=source_url,
+                resolved_url=resolved_url,
+            )
+        )
+
+    def recent_pipeline_errors(self, limit: int = 50) -> list[PipelineError]:
+        """Read newest first for the future failed/operational frontend tab."""
+        return self._database.read(
+            lambda connection: [
+                PipelineError(*row)
+                for row in connection.execute(
+                    """SELECT error_key, stage, source_signature, source_url, resolved_url, message,
+                              occurrence_count, first_occurred_at, last_occurred_at
+                       FROM pipeline_errors
+                       ORDER BY last_occurred_at DESC, error_key
+                       LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+            ]
+        )
+
+    def screenshots_for_resolved_url(self, resolved_url: str) -> list[ApplicationScreenshot]:
+        """Return only Nginx-relative evidence paths for a provider listing."""
+        return self._database.read(
+            lambda connection: [
+                ApplicationScreenshot(*row)
+                for row in connection.execute(
+                    """SELECT s.resolved_listing_id, s.stage, s.nginx_path, s.captured_at
+                       FROM application_screenshots AS s
+                       JOIN resolved_listings AS r ON r.id = s.resolved_listing_id
+                       WHERE r.resolved_url = ?
+                       ORDER BY s.captured_at, s.id""",
+                    (resolved_url,),
+                ).fetchall()
+            ]
+        )
+
+    def mark_application_awaiting_review(
+        self, work: ApplicationWork, screenshot_key: str, *, screenshot_stage: str = "capture"
+    ) -> None:
+        """Record browser evidence and stop before any irreversible submission."""
+        if screenshot_stage not in {"capture", "before_fill", "after_fill", "before_submit", "after_submit", "failure"}:
+            raise ValueError("unsupported screenshot stage")
+        nginx_path = self._nginx_screenshot_path(screenshot_key)
+
+        def write(connection: sqlite3.Connection) -> None:
+            connection.execute(
                 """UPDATE applications
                    SET status = 'awaiting_review', screenshot_key = ?, error = NULL,
                        lease_expires_at = NULL, completed_at = CURRENT_TIMESTAMP,
@@ -715,12 +985,25 @@ class PipelineDatabase:
                      AND status = 'processing'""",
                 (screenshot_key, work.source_signature, work.source_url, work.resolved_url),
             )
-        )
+            resolved = connection.execute(
+                "SELECT id FROM resolved_listings WHERE resolved_url = ?", (work.resolved_url,)
+            ).fetchone()
+            if resolved is None:
+                raise RuntimeError("application references a missing resolved listing")
+            connection.execute(
+                """INSERT INTO application_screenshots (resolved_listing_id, stage, nginx_path)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(resolved_listing_id, stage) DO UPDATE SET
+                     nginx_path = excluded.nginx_path, captured_at = CURRENT_TIMESTAMP""",
+                (resolved[0], screenshot_stage, nginx_path),
+            )
+
+        self._database.write(write)
 
     def mark_application_failed(self, work: ApplicationWork, error: str) -> None:
         """Persist a retryable browser failure and release its lease."""
-        self._database.write(
-            lambda connection: connection.execute(
+        def write(connection: sqlite3.Connection) -> None:
+            connection.execute(
                 """UPDATE applications
                    SET status = 'failed', error = ?, lease_expires_at = NULL,
                        updated_at = CURRENT_TIMESTAMP
@@ -728,7 +1011,16 @@ class PipelineDatabase:
                      AND status = 'processing'""",
                 (error, work.source_signature, work.source_url, work.resolved_url),
             )
-        )
+            self._record_pipeline_error_in_transaction(
+                connection,
+                stage="application_worker",
+                message=error,
+                source_signature=work.source_signature,
+                source_url=work.source_url,
+                resolved_url=work.resolved_url,
+            )
+
+        self._database.write(write)
 
     def application_status(
         self, source_signature: str, source_url: str, resolved_url: str

@@ -8,6 +8,7 @@ import sqlite3
 import pytest
 
 from query_service.database import PipelineDatabase
+from query_service.extractor import ListingDetails
 
 
 pytestmark = pytest.mark.database
@@ -64,6 +65,27 @@ def test_room_count_flows_from_listing_to_resolved_and_application_work(tmp_path
 
     assert application is not None
     assert application.room_count == 3
+
+
+def test_resolved_listing_keeps_normalized_provider_details_for_the_frontend(tmp_path) -> None:
+    """Resolved provider facts are stored once and can be joined by provider URL."""
+    database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
+    database.add_listing_if_new("email-1", "https://stekkies.test/1", "View match", "Listings")
+    listing = database.unread_listings()[0]
+
+    database.add_resolved_listing_and_mark_source_read(
+        listing,
+        "https://provider.test/home/42",
+        ListingDetails("Canal apartment", "Amsterdam", 150_000, 72, 3),
+    )
+
+    details = database.listing_details_for_resolved_url("https://provider.test/home/42")
+    assert details is not None
+    assert details.provider_title == "Canal apartment"
+    assert details.location == "Amsterdam"
+    assert details.monthly_rent_cents == 150_000
+    assert details.area_m2 == 72
+    assert details.room_count == 3
 
 
 def test_poller_writes_while_processor_reads_without_losing_emails(tmp_path) -> None:

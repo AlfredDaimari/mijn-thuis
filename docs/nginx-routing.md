@@ -1,7 +1,10 @@
 # Nginx routing design
 
 The Ansible playbook installs and enables Nginx on the VPS. It owns the public
-HTTP port; Docker workers do not publish their own HTTP ports.
+HTTP port; Docker workers do not publish their own HTTP ports. The current
+landing page is HTTP-only while the server is being brought up. The planned
+dashboard deployment changes the public origin to HTTPS with HTTP redirected
+to HTTPS, as specified in [`frontend.md`](frontend.md).
 
 ## Routes
 
@@ -20,8 +23,10 @@ maps directly to a public path such as `/screenshots/<key>.png`, with no copy
 step and no container-local state.
 
 The directory is persistent across container recreation. Directory listing is
-disabled and responses are marked `Cache-Control: private, no-store`; add
-application authentication before exposing screenshots beyond trusted users.
+disabled and responses are marked `Cache-Control: private, no-store`. Before
+the dashboard is exposed, the same Nginx Basic Auth realm must protect `/`,
+`/api/`, and `/screenshots/`; HTTPS must be live first. The API should return
+only stored Nginx-relative screenshot paths from `application_screenshots`.
 
 ## Deployment prerequisite
 

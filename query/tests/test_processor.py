@@ -5,7 +5,7 @@ from email.message import EmailMessage
 import pytest
 
 from query_service.database import PipelineDatabase
-from query_service.extractor import Listing, extract_listings
+from query_service.extractor import Listing, extract_listing_details, extract_listings
 from query_service.processor import process_once
 
 
@@ -48,6 +48,25 @@ def test_extract_listings_excludes_tracking_assets_and_unsubscribe_urls() -> Non
     assert listings == [
         Listing("https://www.stekkies.com/nl/api/v1/redirect/listing-id", "View match")
     ]
+
+
+@pytest.mark.unit
+def test_extract_listing_details_only_uses_explicit_provider_facts() -> None:
+    """Dutch provider text yields display fields without guessing a deposit as rent."""
+    details = extract_listing_details(
+        """Huurprijs: € 1.250,00 per maand
+        Locatie: Amsterdam Oost
+        Woonoppervlakte: 64 m²
+        3-kamerwoning
+        Borg: € 2.500,00""",
+        "Apartment at a provider",
+    )
+
+    assert details.provider_title == "Apartment at a provider"
+    assert details.location == "Amsterdam Oost"
+    assert details.monthly_rent_cents == 125_000
+    assert details.area_m2 == 64
+    assert details.room_count == 3
 
 
 @pytest.mark.service
@@ -112,3 +131,4 @@ def test_processor_logs_and_marks_read_when_email_has_no_listing(caplog, tmp_pat
     assert "No listing links could be extracted" in caplog.text
     assert database.unread_emails() == []
     assert database.unread_listings() == []
+    assert database.recent_pipeline_errors()[0].stage == "listing_processor"

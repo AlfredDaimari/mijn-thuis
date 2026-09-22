@@ -19,6 +19,21 @@ class Listing:
     room_count: int | None = None
 
 
+@dataclass(frozen=True)
+class ListingDetails:
+    """Conservative display metadata found on a provider listing page.
+
+    Every value is optional: providers use different page structures, and an
+    unknown value is safer than presenting a guess in the user interface.
+    """
+
+    provider_title: str | None = None
+    location: str | None = None
+    monthly_rent_cents: int | None = None
+    area_m2: int | None = None
+    room_count: int | None = None
+
+
 class _AnchorParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -98,6 +113,63 @@ def extract_room_count(text: str | None) -> int | None:
         return None
     room_count = int(match.group("number")) if match.group("number") else _ROOM_WORDS[match.group("word").lower()]
     return room_count if 1 <= room_count <= 20 else None
+
+
+_LOCATION_PATTERN = re.compile(
+    r"(?:locatie|plaats|adres|location|city|address)\s*[:\-]\s*([^\n|]{2,100})",
+    re.IGNORECASE,
+)
+_RENT_PATTERN = re.compile(
+    r"(?:huurprijs|huur|rent|rental price|prijs)\s*[:\-]?\s*(?:€|eur)\s*"
+    r"(?P<amount>\d{1,3}(?:[.\s]\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)",
+    re.IGNORECASE,
+)
+_MONTHLY_PRICE_PATTERN = re.compile(
+    r"(?:€|eur)\s*(?P<amount>\d{1,3}(?:[.\s]\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)"
+    r"\s*(?:p(?:er)?\.?\s*(?:m(?:aand)?|month)|/\s*(?:m(?:aand)?|month))",
+    re.IGNORECASE,
+)
+_AREA_PATTERN = re.compile(r"\b(?P<area>\d{1,4})\s*(?:m²|m2)\b", re.IGNORECASE)
+
+
+def _euro_amount_to_cents(amount: str) -> int | None:
+    """Convert common Dutch/English euro formatting without using floats."""
+    normalized = amount.replace(" ", "").replace(".", "").replace(",", ".")
+    try:
+        euros, _, decimals = normalized.partition(".")
+        cents = (decimals + "00")[:2]
+        value = int(euros) * 100 + int(cents)
+    except ValueError:
+        return None
+    return value if 0 < value <= 10_000_000 else None
+
+
+def extract_listing_details(text: str | None, provider_title: str | None = None) -> ListingDetails:
+    """Extract only explicitly labelled, broadly reusable housing facts.
+
+    This deliberately skips unlabelled addresses and arbitrary euro amounts
+    (for example deposits or service charges) instead of guessing.
+    """
+    text = text or ""
+    location_match = _LOCATION_PATTERN.search(text)
+    location = " ".join(location_match.group(1).split()) if location_match else None
+    if location:
+        location = location.rstrip(".,;:")
+
+    rent_match = _RENT_PATTERN.search(text) or _MONTHLY_PRICE_PATTERN.search(text)
+    rent_cents = _euro_amount_to_cents(rent_match.group("amount")) if rent_match else None
+    area_match = _AREA_PATTERN.search(text)
+    area_m2 = int(area_match.group("area")) if area_match else None
+    if area_m2 is not None and not 5 <= area_m2 <= 2_000:
+        area_m2 = None
+
+    return ListingDetails(
+        provider_title=" ".join(provider_title.split()) if provider_title else None,
+        location=location,
+        monthly_rent_cents=rent_cents,
+        area_m2=area_m2,
+        room_count=extract_room_count(text),
+    )
 
 
 def extract_listings(raw_message: bytes) -> list[Listing]:

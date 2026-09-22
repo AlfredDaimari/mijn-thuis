@@ -23,6 +23,11 @@ def process_once(database: PipelineDatabase) -> int:
                 email.message_id or "unknown",
                 email.subject or "(no subject)",
             )
+            database.record_pipeline_error(
+                stage="listing_processor",
+                message=error,
+                source_signature=email.signature,
+            )
             database.mark_email_read(email.signature, extraction_error=error)
             handled += 1
             continue

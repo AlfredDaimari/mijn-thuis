@@ -23,17 +23,21 @@ network filesystem or with workers spread across Docker hosts.
                                                                v
                                                         resolved_listings
                                                                |
+                             listing_details <───────────────┘
+                                                               |
                                                                v
                                     Provider application worker (Chromium)
                                                                |
-                                         applications / application_attempts
+                          applications / application_screenshots / pipeline_errors
                                                                |
                                                                v
               /srv/house-bot/screenshots  <── screenshots and Nginx /screenshots/
 ```
 
 The frontend must use a backend API for application state and screenshots. A
-browser must not mount or query the SQLite database directly.
+browser must not mount or query the SQLite database directly. See
+[`frontend.md`](frontend.md) for the UI, Basic Authentication, HTTPS, and
+cursor-pagination plan.
 
 ## Current baseline
 
@@ -52,7 +56,17 @@ uses a busy timeout plus retry for brief write contention. The extractor and
 resolver already make their queue handoff atomic: write the downstream record
 and mark the source record read in the same transaction. The provider review
 worker atomically claims a resolved listing with a finite lease, captures a
-screenshot, and stops at `awaiting_review`; it does not fill or submit forms.
+screenshot, and stops at `awaiting_review`; it does not submit forms.
+
+During resolution, conservative extraction records a provider page title,
+explicitly labelled location, monthly rent in euro cents, floor area in square
+metres, and room count in `listing_details`, keyed by `resolved_listings.id`.
+Unknown values remain `NULL`; the pipeline intentionally does not guess from
+an unlabelled price or address. `application_screenshots` records each durable
+Nginx-relative evidence path by resolved-listing ID and stage (`capture`,
+`before_fill`, `after_fill`, `before_submit`, or `after_submit`).
+`pipeline_errors` coalesces identical safe worker failures while queue-specific
+fields such as `applications.error` remain the source of retry state.
 
 ## Docker topology
 
@@ -127,7 +141,9 @@ minimal durable model needs:
 | status | `pending`, `processing`, `awaiting_review`, `submitted`, or `failed`. |
 | lease expiry | Allows recovery when a worker dies after claiming work. |
 | attempt count and error | Makes retry behaviour visible and bounded. |
-| screenshot key/path | Refers to a file in `/app/screenshots`, never to a container-local path. |
+| screenshot catalogue | `application_screenshots` links each resolved-listing ID and capture stage to an Nginx-relative `/screenshots/...` path, never to a container-local path. |
+| display details | `listing_details` holds optional provider title, location, rent cents, area, and refined room count once per resolved listing. |
+| worker errors | `pipeline_errors` holds deduplicated safe diagnostics for operational visibility; do not store secrets, raw emails, or form values. |
 | timestamps | Records creation, claim, completion, and review/submission time. |
 
 The worker must use this sequence:
@@ -138,9 +154,10 @@ The worker must use this sequence:
    item only when the application row was made durable.
 2. Close the SQLite connection.
 3. Use Chromium to visit the provider site without filling or submitting a form.
-4. Save the screenshot atomically: write a temporary file under the screenshot
+4. Save each screenshot atomically: write a temporary file under the screenshot
    volume, then rename it to its final stable name.
-5. In a short transaction, record the screenshot key and final status. On a
+5. In a short transaction, record the screenshot stage and Nginx-relative path
+   plus final status. On a
    browser failure, record a retryable `failed` state with diagnostic context;
    do not silently discard the item.
 
@@ -186,7 +203,8 @@ reviewable record when it does not.
    Its browser logic must depend on database-layer methods, not direct SQL.
 4. Add the screenshots volume and ensure screenshots survive container
    recreation.
-5. Add a backend API and frontend that show status, errors, and screenshots.
+5. Add a Basic-Auth protected backend API and frontend that show paginated
+   status, errors, listing details, and screenshots; see `frontend.md`.
 6. Add container orchestration (normally a Compose file) with all workers on
    the same local Docker host, named volumes, read-only configuration mounts,
    restart policies, and resource limits for Chromium workers.

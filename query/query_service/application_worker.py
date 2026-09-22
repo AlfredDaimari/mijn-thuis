@@ -175,13 +175,17 @@ def process_once(
             screenshot_key = _capture_for_review(work, screenshot_directory)
             fields: list[str] = []
             model_reason = None
+            screenshot_stage = "capture"
         else:
             if planner is None:
                 raise RuntimeError("OpenRouter planner was not configured for form processing")
             screenshot_key, fields, model_reason = _fill_for_review(
                 work, screenshot_directory, profile, planner, accounts or {}
             )
-        database.mark_application_awaiting_review(work, screenshot_key)
+            screenshot_stage = "after_fill"
+        database.mark_application_awaiting_review(
+            work, screenshot_key, screenshot_stage=screenshot_stage
+        )
         logging.info(
             "Provider listing ready for review | title=%r | provider_url=%s | screenshot=%s "
             "| rooms=%s | fields=%s | model_navigation_reasons=%r",
