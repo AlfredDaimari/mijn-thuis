@@ -1,5 +1,0 @@
-# Copy this file to terraform.tfvars and replace the example service name.
-# Find this value in OVHcloud Manager: Bare Metal Cloud > Virtual Private
-# Servers > your VPS. This configuration only reads that VPS; it does not
-# order or modify infrastructure.
-vps_service_name = "vps-123456789.vps.ovh.net"

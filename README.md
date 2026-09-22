@@ -1,10 +1,6 @@
 # Small OVHcloud Docker VPS
 
-`terraform/` describes an already-purchased OVHcloud VPS. It uses the VPS service name as a read-only data source and has no Terraform resources, so it cannot order another VPS, reinstall it, resize it, or alter its networking. This project does not use an OVHcloud Public Cloud instance.
-
-In OVHcloud Manager, go to **Bare Metal Cloud → Virtual Private Servers → your VPS**. Copy the internal service name, such as `vps-123456789.vps.ovh.net`, into `terraform/terraform.tfvars`. Start with `terraform/terraform.tfvars-example`; the actual `terraform.tfvars` is intentionally Git-ignored. The configuration reports the VPS's display name, actual datacenter, attached IPs, RAM, and vCores. Its bundled public IPv4 is in the reported IP list; copy it to `ansible/inventory.ini`.
-
-You do not need a plan code, datacenter code, operating-system image ID, payment method, or SSH public key path for an existing VPS. Those are purchase/reinstall inputs, not existing-server lookup inputs. No Terraform commands have been run by this project setup.
+This repository deploys to an already-purchased OVHcloud VPS. In OVHcloud Manager, go to **Bare Metal Cloud → Virtual Private Servers → your VPS** and copy its public IPv4 into `ansible/inventory.ini`. Infrastructure provisioning is intentionally outside this repository.
 
 To install Docker, edit `ansible/inventory.ini`, make the runner executable once with `chmod +x ansible/run-playbook.sh`, and run it from the `ansible` directory. The script creates or reuses `ansible/.venv` and installs the pinned Ansible requirement only inside that project virtual environment—never with `apt` on the control machine. The playbook always refreshes APT metadata, upgrades packages, installs `docker.io`, enables Docker, and adds the SSH user to the `docker` group.
 

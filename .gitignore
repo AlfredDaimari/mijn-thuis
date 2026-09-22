@@ -1,9 +1,5 @@
 venv/
 ansible/.venv/
-.terraform/
-*.tfstate
-*.tfstate.*
-terraform/terraform.tfvars
 query/values.yaml
 query/accounts.yaml
 query/data/
