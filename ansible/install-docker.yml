@@ -1,5 +1,5 @@
 ---
-- name: Update the VM and install Docker
+- name: Update the VM and install Docker with Nginx routing
   hosts: docker_hosts
   become: true
   gather_facts: true
@@ -16,9 +16,53 @@
         name: docker.io
         state: present
 
+    - name: Install Nginx for frontend, API, and screenshot routing
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+
+    - name: Create the host directories shared by Docker and Nginx
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /srv/house-bot/frontend
+        - /srv/house-bot/screenshots
+
+    - name: Configure the house-bot Nginx virtual host
+      ansible.builtin.template:
+        src: nginx-house-bot.conf.j2
+        dest: /etc/nginx/sites-available/house-bot
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload Nginx
+
+    - name: Enable the house-bot Nginx virtual host
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/house-bot
+        dest: /etc/nginx/sites-enabled/house-bot
+        state: link
+      notify: Reload Nginx
+
+    - name: Disable the default Nginx virtual host
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload Nginx
+
     - name: Enable and start Docker
       ansible.builtin.service:
         name: docker
+        state: started
+        enabled: true
+
+    - name: Enable and start Nginx
+      ansible.builtin.service:
+        name: nginx
         state: started
         enabled: true
 
@@ -27,3 +71,9 @@
         name: "{{ ansible_user }}"
         groups: docker
         append: true
+
+  handlers:
+    - name: Reload Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded

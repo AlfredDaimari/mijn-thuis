@@ -1,0 +1,32 @@
+# The frontend is static. The future Python API is intentionally not installed
+# by this playbook; when added, it must listen privately on 127.0.0.1:8000.
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    root /srv/house-bot/frontend;
+    index index.html;
+
+    # Docker writes <screenshot-key>.png into this exact host directory.
+    location /screenshots/ {
+        alias /srv/house-bot/screenshots/;
+        autoindex off;
+        add_header Cache-Control "private, no-store" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    # Reserved for the future Python backend that reads pipeline.sqlite3.
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
