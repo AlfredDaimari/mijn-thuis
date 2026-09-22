@@ -17,7 +17,7 @@ applicant:
   message_single_person: |
     Hello,
 
-    My name is Alfred Daimari and I am very interested in this property. I would appreciate the opportunity to view it, if possible. Please let me know if a viewing can be arranged.
+    My name is Alfred Daimari and I am very interested in this property. From what I have seen, it appears to meet my financial and space requirements. I would appreciate the opportunity to view it, if possible. Please let me know if a viewing can be arranged.
 
     Thank you for your time.
 
@@ -27,7 +27,7 @@ applicant:
   message_two_person: |
     Hello,
 
-    My name is Alfred Daimari, and my partner Chris Benhard and I are very interested in this property. We would appreciate the opportunity to view it, if possible. Please let us know if a viewing can be arranged.
+    My name is Alfred Daimari, and my partner Chris Benhard and I are very interested in this property. From what we have seen, it appears to meet our financial and space requirements. We would appreciate the opportunity to view it, if possible. Please let us know if a viewing can be arranged.
 
     Thank you for your time.
 
