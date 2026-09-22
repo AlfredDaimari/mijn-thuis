@@ -37,7 +37,10 @@ services:
     shm_size: 512mb
     volumes:
       - house-query-data:/app/data
-      - house-screenshots:/app/screenshots
+      # Nginx on the VPS serves this exact host directory at /screenshots/.
+      - type: bind
+        source: ${HOUSE_SCREENSHOTS_DIR:-/srv/house-bot/screenshots}
+        target: /app/screenshots
       - type: bind
         source: ${QUERY_VALUES_FILE:-./query/values.yaml}
         target: /app/values.yaml
@@ -50,5 +53,3 @@ services:
 volumes:
   house-query-data:
     name: house-query-data
-  house-screenshots:
-    name: house-screenshots

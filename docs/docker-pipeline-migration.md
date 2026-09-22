@@ -4,7 +4,8 @@
 
 Run the housing workflow as four independently restartable containers on the
 same Docker host. They share one local SQLite pipeline database, while browser
-screenshots live in a separate persistent volume.
+screenshots live in `/srv/house-bot/screenshots`, a persistent host bind mount
+served by Nginx.
 
 This is deliberately a **single-host** design. It is the appropriate shape for
 the existing OVH VPS and low-volume workflow. Do not use this design with a
@@ -28,7 +29,7 @@ network filesystem or with workers spread across Docker hosts.
                                          applications / application_attempts
                                                                |
                                                                v
-                         house-screenshots volume  <── screenshots and evidence
+              /srv/house-bot/screenshots  <── screenshots and Nginx /screenshots/
 ```
 
 The frontend must use a backend API for application state and screenshots. A
@@ -55,11 +56,11 @@ screenshot, and stops at `awaiting_review`; it does not fill or submit forms.
 
 ## Docker topology
 
-Use one named volume for SQLite and one distinct named volume for screenshots:
+Use one named volume for SQLite and one shared host directory for screenshots:
 
 ```text
 house-query-data  -> /app/data       (read/write in every worker)
-house-screenshots -> /app/screenshots (read/write only in the application worker)
+/srv/house-bot/screenshots -> /app/screenshots (read/write in the application worker)
 ```
 
 Every worker receives the same mounted, read-only `values.yaml` (or equivalent
@@ -78,10 +79,10 @@ command. Split an application worker into a separate image only when its
 dependencies or release cadence genuinely diverge; image count is not a
 service boundary.
 
-`docker-compose.yml` defines the four services individually. It uses local
-named `house-query-data` and `house-screenshots` volumes, read-only
-`values.yaml`, restart policies, `--init`, and memory/shared-memory limits for
-the Chromium workers. Start all four with `docker compose up -d --build`.
+`docker-compose.yml` defines the four services individually. It uses the local
+named `house-query-data` volume, a `/srv/house-bot/screenshots` bind mount,
+read-only `values.yaml`, restart policies, `--init`, and memory/shared-memory
+limits for the Chromium workers. Start all four with `docker compose up -d --build`.
 
 Run exactly one replica of each worker initially. Use Docker restart policies
 and `--init` (or their Compose equivalents) so SIGINT/SIGTERM reaches Python
