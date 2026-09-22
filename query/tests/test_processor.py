@@ -64,6 +64,8 @@ def test_processor_queues_extracted_listing_then_marks_email_read(tmp_path) -> N
     queued_listings = database.unread_listings()
     assert len(queued_listings) == 1
     assert queued_listings[0].url == "https://houses.test/42"
+    assert process_once(database) == 0
+    assert len(database.unread_listings()) == 1
 
 
 @pytest.mark.service

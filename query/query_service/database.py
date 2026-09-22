@@ -140,6 +140,7 @@ def _migrate_seen_emails(connection: sqlite3.Connection) -> None:
     connection.execute("UPDATE resolved_listings SET id = rowid WHERE id IS NULL")
     connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS resolved_listings_id_idx ON resolved_listings (id)")
     connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS resolved_listings_url_idx ON resolved_listings (resolved_url)")
+    connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS applications_resolved_url_idx ON applications (resolved_url)")
     for table in ("listings", "resolved_listings", "applications"):
         columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
         if "room_count" not in columns:
@@ -421,6 +422,10 @@ class PipelineDatabase:
         );
         CREATE INDEX IF NOT EXISTS applications_status_lease_idx
             ON applications (status, lease_expires_at, source_signature, source_url, resolved_url);
+        -- A provider URL identifies one house in this pipeline. This adds a
+        -- database-enforced guard beyond resolved-listing deduplication.
+        CREATE UNIQUE INDEX IF NOT EXISTS applications_resolved_url_idx
+            ON applications (resolved_url);
     """
 
     _SCHEMA = (
@@ -678,8 +683,8 @@ class PipelineDatabase:
             ).fetchone()
             if resolved is None:
                 return None
-            connection.execute(
-                """INSERT INTO applications
+            inserted = connection.execute(
+                """INSERT OR IGNORE INTO applications
                    (source_signature, source_url, resolved_url, title, source_subject, room_count,
                     status, lease_expires_at, attempt_count, claimed_at)
                    VALUES (?, ?, ?, ?, ?, ?, 'processing', datetime('now', ?), 1, CURRENT_TIMESTAMP)""",
@@ -690,6 +695,10 @@ class PipelineDatabase:
                    WHERE source_signature = ? AND source_url = ? AND resolved_url = ?""",
                 resolved[:3],
             )
+            if inserted.rowcount != 1:
+                # An existing application owns this provider URL. Consume the
+                # duplicate queue item without visiting or submitting again.
+                return None
             return ApplicationWork(*resolved, 1)
 
         return self._database.write(claim)
@@ -737,6 +746,14 @@ class PipelineDatabase:
                 )
                 else None
             )
+        )
+
+    def application_count_for_resolved_url(self, resolved_url: str) -> int:
+        """Return the durable application-record count for one provider URL."""
+        return self._database.read(
+            lambda connection: connection.execute(
+                "SELECT COUNT(*) FROM applications WHERE resolved_url = ?", (resolved_url,)
+            ).fetchone()[0]
         )
 
     def application_error(

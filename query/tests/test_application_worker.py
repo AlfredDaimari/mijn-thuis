@@ -1,4 +1,6 @@
-"""Database and workflow tests for the human-review provider worker."""
+"""Database and workflow tests for the duplicate-safe provider worker."""
+
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -38,6 +40,20 @@ def test_application_claim_acknowledges_resolved_item_and_retries_failure(tmp_pa
     assert second_claim is not None
     assert second_claim.attempt_count == 2
     assert second_claim.resolved_url == first_claim.resolved_url
+    assert database.application_count_for_resolved_url(first_claim.resolved_url) == 1
+
+
+@pytest.mark.database
+def test_concurrent_application_claims_create_only_one_record_per_house(tmp_path) -> None:
+    """Two applier workers cannot claim or create duplicate work for one provider URL."""
+    database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
+    resolved_listing(database)
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        claims = list(workers.map(lambda _number: database.claim_next_application(), range(2)))
+
+    assert len([claim for claim in claims if claim is not None]) == 1
+    assert database.application_count_for_resolved_url("https://provider.example/listing/1") == 1
 
 
 @pytest.mark.service

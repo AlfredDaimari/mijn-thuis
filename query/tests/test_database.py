@@ -21,6 +21,7 @@ def test_single_pipeline_database_indexes_each_unread_queue(tmp_path) -> None:
         ("seen_emails_unread_signature_idx", ("is_read", "signature")),
         ("listings_unread_source_url_idx", ("is_read", "source_signature", "url")),
         ("resolved_listings_unread_source_url_idx", ("is_read", "source_signature", "source_url", "resolved_url")),
+        ("applications_resolved_url_idx", ("resolved_url",)),
     )
 
     for index_name, expected_columns in indexes:
