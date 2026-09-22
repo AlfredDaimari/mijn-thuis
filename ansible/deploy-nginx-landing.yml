@@ -1,0 +1,62 @@
+---
+- name: Publish the temporary house-bot landing page
+  hosts: docker_hosts
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Install Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: true
+
+    - name: Create the Nginx frontend directory
+      ansible.builtin.file:
+        path: /srv/house-bot/frontend
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Publish the landing page
+      ansible.builtin.copy:
+        src: landing-page.html
+        dest: /srv/house-bot/frontend/index.html
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Configure the house-bot Nginx virtual host
+      ansible.builtin.template:
+        src: nginx-house-bot.conf.j2
+        dest: /etc/nginx/sites-available/house-bot
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload Nginx
+
+    - name: Enable the house-bot Nginx virtual host
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/house-bot
+        dest: /etc/nginx/sites-enabled/house-bot
+        state: link
+      notify: Reload Nginx
+
+    - name: Disable the default Nginx virtual host
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload Nginx
+
+    - name: Enable and start Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true
+
+  handlers:
+    - name: Reload Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded

@@ -12,6 +12,15 @@ cd ansible
 
 The runner deliberately uses your existing SSH agent (`SSH_AUTH_SOCK`), so no private-key path or password is stored in the repository. It checks that an agent has a loaded key and relies on the configured VPS account's passwordless `sudo`, so it does not prompt for either SSH or elevation passwords. Before the first Ansible run, confirm `ssh YOUR_ANSIBLE_USER@YOUR_VPS_IPV4` succeeds with the loaded key; this also records the server host key locally. The script creates or reuses `ansible/.venv` and installs the pinned Ansible requirement only inside that project virtual environment—never with `apt` on the control machine. The playbook always refreshes APT metadata, upgrades packages, installs `docker.io`, enables Docker, and adds the SSH user to the `docker` group.
 
+To publish the basic Nginx health page at `http://YOUR_VPS_IPV4/`, run the separate Nginx deployment:
+
+```bash
+cd ansible
+./deploy-nginx-landing.sh
+```
+
+It installs and starts Nginx, enables the repository's site configuration, and writes only `/srv/house-bot/frontend/index.html`. The Docker playbook does not deploy this page; later frontend deployments can replace that file independently.
+
 ## Yahoo Stekkies query service
 
 `query/` has three single-threaded Python processes sharing one SQLite file: `data/pipeline.sqlite3`. Its `seen_emails`, `listings`, and `resolved_listings` tables are the pipeline queues. The Yahoo poller reads only messages sent from `stekkies.com` and writes the full email with `is_read = 0`. The listing processor extracts HTTP(S) listing links and atomically writes new listing records and marks the source email read. The resolver atomically writes an external provider URL and marks its source listing read. A SHA-256 signature prevents duplicate email queue entries, while `(source_signature, url)` prevents duplicate listing entries. Unread queue reads are ordered by each table's stable record ID and have matching composite indexes beginning with `is_read`, so SQLite can locate unread work without scanning read history. All SQL now lives in `query_service/database.py`; services call its database methods and never share a SQLite connection. The database layer opens a connection per operation, enables WAL mode, uses a busy timeout and retries lock contention, so the poller can write while the processor reads. Keep one consumer of each queue, because reading and marking an item are intentionally separate operations. All processes write timestamped logs without passwords or email bodies. The processor logs an error with the email subject when a Stekkies email has no extractable listing links.
