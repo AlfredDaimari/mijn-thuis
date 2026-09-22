@@ -29,15 +29,6 @@ fi
 "$VENV_DIR/bin/python" -m pip install --upgrade pip
 "$VENV_DIR/bin/python" -m pip install -r "$SCRIPT_DIR/requirements.txt"
 
-# SSH authentication uses the agent key; -K asks only for the remote sudo
-# password required by this privileged playbook. Set ASK_BECOME_PASS=false only
-# when the remote account has deliberately been configured for passwordless sudo.
-PLAYBOOK_ARGS=(
-  -i "$SCRIPT_DIR/inventory.ini"
-)
-
-if [[ "${ASK_BECOME_PASS:-true}" == "true" ]]; then
-  PLAYBOOK_ARGS+=(--ask-become-pass)
-fi
-
-exec "$VENV_DIR/bin/ansible-playbook" "${PLAYBOOK_ARGS[@]}" "$SCRIPT_DIR/install-docker.yml" "$@"
+# SSH authentication and passwordless sudo both use the configured VPS account;
+# no password prompt or password storage is needed.
+exec "$VENV_DIR/bin/ansible-playbook" -i "$SCRIPT_DIR/inventory.ini" "$SCRIPT_DIR/install-docker.yml" "$@"

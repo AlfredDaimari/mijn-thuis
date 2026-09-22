@@ -10,7 +10,7 @@ cd ansible
 ./run-playbook.sh
 ```
 
-The runner deliberately uses your existing SSH agent (`SSH_AUTH_SOCK`), so no private-key path or SSH password is stored in the repository. It checks that an agent has a loaded key, then prompts only for the remote `sudo` password. Before the first Ansible run, confirm `ssh YOUR_ANSIBLE_USER@YOUR_VPS_IPV4` succeeds with the loaded key; this also records the server host key locally. Set `ASK_BECOME_PASS=false` only if you have intentionally configured passwordless `sudo` on the VPS. The script creates or reuses `ansible/.venv` and installs the pinned Ansible requirement only inside that project virtual environment—never with `apt` on the control machine. The playbook always refreshes APT metadata, upgrades packages, installs `docker.io`, enables Docker, and adds the SSH user to the `docker` group.
+The runner deliberately uses your existing SSH agent (`SSH_AUTH_SOCK`), so no private-key path or password is stored in the repository. It checks that an agent has a loaded key and relies on the configured VPS account's passwordless `sudo`, so it does not prompt for either SSH or elevation passwords. Before the first Ansible run, confirm `ssh YOUR_ANSIBLE_USER@YOUR_VPS_IPV4` succeeds with the loaded key; this also records the server host key locally. The script creates or reuses `ansible/.venv` and installs the pinned Ansible requirement only inside that project virtual environment—never with `apt` on the control machine. The playbook always refreshes APT metadata, upgrades packages, installs `docker.io`, enables Docker, and adds the SSH user to the `docker` group.
 
 ## Yahoo Stekkies query service
 
