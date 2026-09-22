@@ -1,10 +1,10 @@
-# Small OVHcloud Docker VM
+# Small OVHcloud Docker VPS
 
-`terraform/` defines one OVHcloud VPS-1: the low-cost VPS option with 2 vCores, 4 GB RAM, and 40 GB NVMe storage. It is an OVHcloud VPS order, not a Public Cloud instance. Standard public networking is part of the VPS product, so no Public Cloud project or separate network is configured.
+`terraform/` describes an already-purchased OVHcloud VPS. It uses the VPS service name as a read-only data source and has no Terraform resources, so it cannot order another VPS, reinstall it, resize it, or alter its networking. This project does not use an OVHcloud Public Cloud instance.
 
-Copy `terraform/terraform.tfvars-example` to `terraform/terraform.tfvars`, fill in the current VPS-1 plan code, datacenter, Ubuntu image ID, and absolute path to your public `.pub` SSH key. Configure OVH provider credentials using its supported environment variables and ensure the account has a default payment method. Terraform pre-installs the public key on the VPS. After provisioning, copy the assigned public IPv4 from the OVHcloud Control Panel into `ansible/inventory.ini`.
+In OVHcloud Manager, go to **Bare Metal Cloud → Virtual Private Servers → your VPS**. Copy the internal service name, such as `vps-123456789.vps.ovh.net`, into `terraform/terraform.tfvars`. Start with `terraform/terraform.tfvars-example`; the actual `terraform.tfvars` is intentionally Git-ignored. The configuration reports the VPS's display name, actual datacenter, attached IPs, RAM, and vCores. Its bundled public IPv4 is in the reported IP list; copy it to `ansible/inventory.ini`.
 
-The actual `terraform.tfvars` is intentionally Git-ignored. No Terraform commands have been run by this project setup.
+You do not need a plan code, datacenter code, operating-system image ID, payment method, or SSH public key path for an existing VPS. Those are purchase/reinstall inputs, not existing-server lookup inputs. No Terraform commands have been run by this project setup.
 
 To install Docker, edit `ansible/inventory.ini`, make the runner executable once with `chmod +x ansible/run-playbook.sh`, and run it from the `ansible` directory. The script creates or reuses `ansible/.venv` and installs the pinned Ansible requirement only inside that project virtual environment—never with `apt` on the control machine. The playbook always refreshes APT metadata, upgrades packages, installs `docker.io`, enables Docker, and adds the SSH user to the `docker` group.
 

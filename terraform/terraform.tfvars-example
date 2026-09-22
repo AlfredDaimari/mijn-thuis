@@ -1,17 +1,5 @@
-# Copy this file to terraform.tfvars and replace every placeholder value.
-# Do not put OVH API credentials in this file; use the provider's supported
-# environment variables. A default payment method is required to order a VPS.
-instance_name  = "house-bot"
-ovh_subsidiary = "NL"
-
-# Select the current VPS-1 offering (2 vCores, 4 GB RAM, 40 GB NVMe) in the
-# OVHcloud Control Panel/catalog. Keep the standard bundled public IPv4 selected;
-# do not add a separate Public Cloud floating IP for this one VPS.
-vps_plan_code = "your-vps-1-plan-code"
-datacenter    = "your-vps-datacenter-code"
-os_name       = "Ubuntu 24.04"
-
-# OVH requires the matching image ID when supplying an SSH public key.
-image_id            = "your-ubuntu-image-id"
-ssh_public_key_path = "/absolute/path/to/id_ed25519.pub"
-require_public_ipv4 = true
+# Copy this file to terraform.tfvars and replace the example service name.
+# Find this value in OVHcloud Manager: Bare Metal Cloud > Virtual Private
+# Servers > your VPS. This configuration only reads that VPS; it does not
+# order or modify infrastructure.
+vps_service_name = "vps-123456789.vps.ovh.net"

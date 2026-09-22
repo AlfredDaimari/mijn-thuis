@@ -11,49 +11,38 @@ terraform {
 
 provider "ovh" {}
 
-# Orders one OVHcloud VPS, rather than a Public Cloud instance. The VPS product
-# includes one public IPv4 in its normal network access. This is the cheapest
-# IPv4 option because it is bundled with the selected VPS rather than ordered
-# as a separate Public Cloud floating-IP/network resource.
-resource "ovh_vps" "vm" {
-  display_name   = var.instance_name
-  ovh_subsidiary = var.ovh_subsidiary
-
-  # OVH requires image_id when a public SSH key is supplied during creation.
-  image_id       = var.image_id
-  public_ssh_key = file(var.ssh_public_key_path)
-
-  plan = [{
-    duration     = "P1M"
-    plan_code    = var.vps_plan_code
-    pricing_mode = "default"
-
-    configuration = [
-      {
-        label = "vps_datacenter"
-        value = var.datacenter
-      },
-      {
-        label = "vps_os"
-        value = var.os_name
-      }
-    ]
-  }]
-
-  lifecycle {
-    precondition {
-      condition     = var.require_public_ipv4
-      error_message = "Choose an OVH VPS plan that includes its bundled public IPv4 address."
-    }
-  }
+# This configuration deliberately reads an already-paid-for VPS. It has no
+# resources, so it cannot order, reinstall, resize, or otherwise change a VPS.
+# The service name is visible in OVHcloud Manager under Bare Metal Cloud >
+# Virtual Private Servers > your VPS.
+data "ovh_vps" "existing" {
+  service_name = var.vps_service_name
 }
 
 output "vps_service_name" {
-  description = "OVHcloud VPS service name. Use its bundled public IPv4 from the OVHcloud Control Panel in Ansible inventory."
-  value       = ovh_vps.vm.name
+  description = "OVHcloud's internal service name for the existing VPS."
+  value       = data.ovh_vps.existing.id
 }
 
 output "vps_display_name" {
-  description = "Configured VPS display name."
-  value       = ovh_vps.vm.display_name
+  description = "Display name configured for the existing VPS."
+  value       = data.ovh_vps.existing.displayname
+}
+
+output "vps_datacenter" {
+  description = "Datacenter reported by OVHcloud for the existing VPS."
+  value       = data.ovh_vps.existing.datacenter
+}
+
+output "vps_public_ips" {
+  description = "IP addresses attached to the existing VPS; copy its IPv4 to ansible/inventory.ini."
+  value       = data.ovh_vps.existing.ips
+}
+
+output "vps_resources" {
+  description = "Compute capacity reported by OVHcloud for the existing VPS."
+  value = {
+    memory_mb = data.ovh_vps.existing.memory
+    vcores    = data.ovh_vps.existing.vcore
+  }
 }
