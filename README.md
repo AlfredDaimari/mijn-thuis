@@ -2,7 +2,15 @@
 
 This repository deploys to an already-purchased OVHcloud VPS. In OVHcloud Manager, go to **Bare Metal Cloud → Virtual Private Servers → your VPS** and copy its public IPv4 into `ansible/inventory.ini`. Infrastructure provisioning is intentionally outside this repository.
 
-To install Docker, edit `ansible/inventory.ini`, make the runner executable once with `chmod +x ansible/run-playbook.sh`, and run it from the `ansible` directory. The script creates or reuses `ansible/.venv` and installs the pinned Ansible requirement only inside that project virtual environment—never with `apt` on the control machine. The playbook always refreshes APT metadata, upgrades packages, installs `docker.io`, enables Docker, and adds the SSH user to the `docker` group.
+To install Docker, edit `ansible/inventory.ini` and load the same private key whose public half is installed on the VPS:
+
+```bash
+ssh-add ~/.ssh/id_ed25519
+cd ansible
+./run-playbook.sh
+```
+
+The runner deliberately uses your existing SSH agent (`SSH_AUTH_SOCK`), so no private-key path or SSH password is stored in the repository. It checks that an agent has a loaded key, then prompts only for the remote `sudo` password. Before the first Ansible run, confirm `ssh YOUR_ANSIBLE_USER@YOUR_VPS_IPV4` succeeds with the loaded key; this also records the server host key locally. Set `ASK_BECOME_PASS=false` only if you have intentionally configured passwordless `sudo` on the VPS. The script creates or reuses `ansible/.venv` and installs the pinned Ansible requirement only inside that project virtual environment—never with `apt` on the control machine. The playbook always refreshes APT metadata, upgrades packages, installs `docker.io`, enables Docker, and adds the SSH user to the `docker` group.
 
 ## Yahoo Stekkies query service
 
