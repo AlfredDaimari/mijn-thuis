@@ -71,7 +71,7 @@ database: "/app/data/pipeline.sqlite3"
 
 The application worker additionally mounts ignored `accounts.yaml`. Copy
 `query/accounts.yaml-template` and include only provider accounts you own. The
-credentials never leave Playwright and are never sent to Gemini.
+credentials never leave Playwright and are never sent to OpenRouter.
 
 All four services share the `house-query-service` image and differ only by
 command. Split an application worker into a separate image only when its
@@ -143,12 +143,19 @@ The worker must use this sequence:
    browser failure, record a retryable `failed` state with diagnostic context;
    do not silently discard the item.
 
+The processor records a room count from each listing email when present; the
+resolver may refine it from visible provider-page text. The value is carried
+through `listings`, `resolved_listings`, and `applications`. The application
+worker selects `message_single_person` for one-room (or unknown-room) homes and
+`message_two_person` for homes with more than one room, without logging either
+message body.
+
 The worker stops at `awaiting_review` before an irreversible provider
 submission. It uses a predefined provider Playwright flow when one is
 registered. Otherwise, generic Dutch/English matching runs first and only a
-failure can trigger Gemini 2.5 Flash. Gemini receives the failure reason and
+failure can trigger the configured OpenRouter model. OpenRouter receives the failure reason and
 redacted visible controls, and can request one validated step at a time (up to
-three per URL). A Gemini-requested provider login uses an exact-host credential
+three per URL). An OpenRouter-requested provider login uses an exact-host credential
 from ignored `accounts.yaml`; a missing entry is stored in `applications.error`.
 The frontend/API can expose the screenshot and an explicit human approval
 action. Automatic submission can be added only as a separately reviewed

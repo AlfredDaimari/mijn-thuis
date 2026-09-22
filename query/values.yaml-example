@@ -10,11 +10,12 @@ applicant:
   last_name: "Your last name"
   phone: "+31..."
   email: "you@example.com"
-  message: "Hello, I am interested in this property."
+  message_single_person: "Hello, I am interested in this property."
+  message_two_person: "Hello, we are interested in this property."
 # Optional, used only when generic matching cannot find a usable contact form.
-# Gemini receives only the failure reason and redacted visible navigation controls.
-gemini_api_key: ""
-gemini_model: "gemini-2.5-flash"
+# OpenRouter receives only the failure reason and redacted visible navigation controls.
+openrouter_api_key: ""
+openrouter_model: "~openai/gpt-luna-latest"
 # Copy the complete Cookie request-header value from a browser session that is
 # already logged into Stekkies. This is an authentication secret.
 stekkies_cookie: "cookie_name=cookie_value"

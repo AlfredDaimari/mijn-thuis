@@ -10,7 +10,7 @@ how other providers work.
 The generic strategy is the first attempt. It matches visible fields using
 Dutch identifiers first (`voornaam`, `achternaam`, `telefoon`, `e-mail`,
 `bericht`, `naam`) and then English identifiers. If no usable form is visible,
-the optional Gemini 2.5 Flash fallback receives the deterministic failure reason
+the optional OpenRouter fallback receives the deterministic failure reason
 and a redacted, numbered list of visible navigation controls. It can only
 suggest a small set of clicks; Playwright re-validates each suggestion. It
 never receives applicant values, cookies, passwords, or full page HTML, and it
@@ -55,9 +55,11 @@ from query_service.provider_adapters import register_flow
 register_flow("www.example-provider.nl", fill_example_provider)
 ```
 
-`fill_example_provider(page, applicant, credentials)` receives a provider
-credential object or `None` and returns the names of profile fields filled.
-When a flow is registered, Gemini is not called for that hostname.
+`fill_example_provider(page, applicant, room_count, credentials)` receives the
+room count and a credential object or `None`, and returns the names of profile
+fields filled. It should call `applicant.message_for_rooms(room_count)` rather
+than embedding either configured message. When a flow is registered, OpenRouter
+is not called for that hostname.
 
 ## Safe implementation procedure
 
@@ -83,9 +85,9 @@ When a flow is registered, Gemini is not called for that hostname.
 ## Failure handling
 
 If a form is absent, hidden, gated by login, inside an unsupported iframe, or
-protected by CAPTCHA, return a clear failure reason. When the Gemini fallback is
+protected by CAPTCHA, return a clear failure reason. When the OpenRouter fallback is
 attempted, concatenate its planning or execution failure with that original
-generic reason and store it in `applications.error`. If Gemini says login is
+generic reason and store it in `applications.error`. If OpenRouter says login is
 required but the hostname has no `accounts.yaml` entry, persist that error and
 do not register an account, guess a password, or bypass access controls. Leave
 the record observable for a future site-specific adapter or manual workflow.

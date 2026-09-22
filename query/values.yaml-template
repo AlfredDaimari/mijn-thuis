@@ -13,14 +13,17 @@ applicant:
   last_name: "Your last name"
   phone: "+31..."
   email: "you@example.com"
-  message: "Hello, I am interested in this property."
+  # Used for one-room homes, and if the room count cannot be extracted.
+  message_single_person: "Hello, I am interested in this property."
+  # Used for homes with two or more rooms.
+  message_two_person: "Hello, we are interested in this property."
 
-# Optional Gemini fallback for unsupported form navigation. This is a secret;
+# Optional OpenRouter fallback for unsupported form navigation. This is a secret;
 # do not commit it. It is not sent unless deterministic form matching fails.
-# Gemini only receives the deterministic failure reason and redacted visible
+# OpenRouter only receives the deterministic failure reason and redacted visible
 # navigation controls; it never receives applicant values, cookies, or passwords.
-gemini_api_key: ""
-gemini_model: "gemini-2.5-flash"
+openrouter_api_key: ""
+openrouter_model: "~openai/gpt-luna-latest"
 
 # Copy the complete Cookie request-header value from a browser session already
 # logged into Stekkies. This is an authentication secret, like a password.
