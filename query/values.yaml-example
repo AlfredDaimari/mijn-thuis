@@ -16,7 +16,7 @@ applicant:
 # Optional, used only when generic matching cannot find a usable contact form.
 # OpenRouter receives only the failure reason and redacted visible navigation controls.
 openrouter_api_key: ""
-openrouter_model: "~openai/gpt-luna-latest"
+openrouter_model: "openai/gpt-6-luna"
 # Copy the complete Cookie request-header value from a browser session that is
 # already logged into Stekkies. This is an authentication secret.
 stekkies_cookie: "cookie_name=cookie_value"

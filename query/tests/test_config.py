@@ -46,7 +46,7 @@ def test_load_settings_reads_optional_applicant_messages_and_openrouter_settings
     values = tmp_path / "values.yaml"
     values.write_text(
         "email: person@yahoo.com\npassword: app-password\n"
-        "openrouter_api_key: test-key\nopenrouter_model: ~openai/gpt-luna-latest\n"
+        "openrouter_api_key: test-key\nopenrouter_model: openai/gpt-6-luna\n"
         "applicant:\n  first_name: Ada\n  last_name: Lovelace\n"
         "  phone: '+31600000000'\n  email: ada@example.com\n"
         "  message_single_person: Interested on my own\n"
@@ -60,7 +60,7 @@ def test_load_settings_reads_optional_applicant_messages_and_openrouter_settings
     assert settings.applicant.message_for_rooms(1) == "Interested on my own"
     assert settings.applicant.message_for_rooms(2) == "Interested together"
     assert settings.openrouter_api_key == "test-key"
-    assert settings.openrouter_model == "~openai/gpt-luna-latest"
+    assert settings.openrouter_model == "openai/gpt-6-luna"
 
 
 def test_load_accounts_reads_only_the_configured_provider_credentials(tmp_path) -> None:

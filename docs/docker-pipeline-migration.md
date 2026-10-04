@@ -115,6 +115,28 @@ It deletes and rebuilds `error_summaries` from the three source tables in one
 transaction. It does not modify pipeline state, retry a failed listing, or
 store credentials, cookies, raw email bodies, or application messages.
 
+## OpenRouter fallback
+
+The form worker uses deterministic Playwright/provider-adapter logic first. It
+makes an LLM request only when that logic cannot find a safe form/navigation
+path. Put an OpenRouter key—not a Gemini key or a direct OpenAI key—in the
+ignored `values.yaml`:
+
+```yaml
+openrouter_api_key: "sk-or-v1-..."
+openrouter_model: "openai/gpt-6-luna"
+```
+
+The client calls `https://openrouter.ai/api/v1`; the installed `openai` Python
+package is solely the OpenAI-compatible HTTP client, not the billing or key
+provider. The request contains only the provider hostname, generic-match
+failure reason, and redacted visible navigation candidates. It never includes
+the OpenRouter key in logs, or sends cookies, provider credentials, applicant
+data, messages, or full page HTML. GPT-6 Luna returns a schema-checked plan
+containing at most one allowed `click` or `login` candidate. Playwright checks
+that candidate again before using it, and never receives a model instruction
+to submit, register, consent, pay, solve a CAPTCHA, or enter form values.
+
 ## SQLite and deployment rules
 
 - Use exactly one replica of each of the four live workers initially.

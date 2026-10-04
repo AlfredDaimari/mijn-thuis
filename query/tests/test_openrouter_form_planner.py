@@ -58,6 +58,6 @@ def test_planner_uses_openrouter_structured_plan_and_no_unrestricted_actions() -
     assert plan.reason == "Open contact form"
     assert [(action.action, action.candidate_index) for action in plan.actions] == [("click", 2)]
     request = client.chat.completions.request
-    assert request["model"] == "~openai/gpt-luna-latest"
+    assert request["model"] == "openai/gpt-6-luna"
     assert request["response_format"]["type"] == "json_schema"
     assert request["extra_body"]["provider"]["require_parameters"] is True

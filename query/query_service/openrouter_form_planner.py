@@ -74,12 +74,17 @@ def planning_input(url: str, generic_failure_reason: str, candidates: list[dict[
 
 
 class OpenRouterFormPlanner:
-    """Use OpenRouter's OpenAI-compatible API after generic matching fails."""
+    """Use OpenRouter's compatible API after generic matching fails.
+
+    The ``openai`` package below is only an HTTP client for the compatible
+    protocol; authentication, routing, billing, and the model selection are
+    all OpenRouter through its base URL and ``openrouter_api_key``.
+    """
 
     def __init__(
         self,
         api_key: str | None,
-        model: str = "~openai/gpt-luna-latest",
+        model: str = "openai/gpt-6-luna",
         *,
         client: Any | None = None,
     ) -> None:

@@ -40,7 +40,7 @@ applicant:
 # OpenRouter only receives the deterministic failure reason and redacted visible
 # navigation controls; it never receives applicant values, cookies, or passwords.
 openrouter_api_key: ""
-openrouter_model: "~openai/gpt-luna-latest"
+openrouter_model: "openai/gpt-6-luna"
 
 # Copy the complete Cookie request-header value from a browser session already
 # logged into Stekkies. This is an authentication secret, like a password.

@@ -14,7 +14,7 @@ class Settings:
     stekkies_cookie: str | None = None
     applicant: "ApplicantProfile | None" = None
     openrouter_api_key: str | None = None
-    openrouter_model: str = "~openai/gpt-luna-latest"
+    openrouter_model: str = "openai/gpt-6-luna"
 
 
 @dataclass(frozen=True)
@@ -54,7 +54,7 @@ def load_settings(path: str | Path) -> Settings:
     database = data.get("database", "data/pipeline.sqlite3")
     stekkies_cookie = data.get("stekkies_cookie")
     openrouter_api_key = data.get("openrouter_api_key")
-    openrouter_model = data.get("openrouter_model", "~openai/gpt-luna-latest")
+    openrouter_model = data.get("openrouter_model", "openai/gpt-6-luna")
     applicant_data = data.get("applicant")
     if not isinstance(email, str) or not email.strip():
         raise ValueError("values.yaml requires a non-empty email")
