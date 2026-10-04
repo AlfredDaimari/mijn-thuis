@@ -131,4 +131,7 @@ def test_processor_logs_and_marks_read_when_email_has_no_listing(caplog, tmp_pat
     assert "No listing links could be extracted" in caplog.text
     assert database.unread_emails() == []
     assert database.unread_listings() == []
-    assert database.recent_pipeline_errors()[0].stage == "listing_processor"
+    database.refresh_error_summaries()
+    summary = database.error_summaries()[0]
+    assert summary.source_table == "emails"
+    assert "No listing links" in summary.error_message

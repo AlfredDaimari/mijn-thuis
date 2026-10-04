@@ -14,15 +14,15 @@ from query_service.extractor import ListingDetails
 pytestmark = pytest.mark.database
 
 
-def test_single_pipeline_database_indexes_each_unread_queue(tmp_path) -> None:
-    """One file contains every unread-first queue index in the pipeline."""
+def test_single_pipeline_database_indexes_each_pending_entity(tmp_path) -> None:
+    """One file indexes each source-of-truth processing state."""
     path = tmp_path / "pipeline.sqlite3"
     PipelineDatabase(path)
     indexes = (
-        ("seen_emails_unread_signature_idx", ("is_read", "signature")),
-        ("listings_unread_source_url_idx", ("is_read", "source_signature", "url")),
-        ("resolved_listings_unread_source_url_idx", ("is_read", "source_signature", "source_url", "resolved_url")),
-        ("applications_resolved_url_idx", ("resolved_url",)),
+        ("emails_processing_id_idx", ("processing_state", "id")),
+        ("stekkies_links_processing_id_idx", ("processing_state", "id")),
+        ("provider_listings_processing_id_idx", ("processing_state", "id")),
+        ("error_summaries_latest_idx", ("last_failed_at", "source_table", "error_fingerprint")),
     )
 
     for index_name, expected_columns in indexes:
@@ -46,6 +46,30 @@ def test_concurrent_duplicate_inserts_create_exactly_one_email(tmp_path) -> None
 
     assert sum(inserted) == 1
     assert len(database.unread_emails()) == 1
+
+
+def test_legacy_pipeline_tables_migrate_to_the_linear_schema(tmp_path) -> None:
+    """Startup copies old queue data once into email, link, and provider rows."""
+    path = tmp_path / "pipeline.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE seen_emails (signature TEXT PRIMARY KEY, message_id TEXT, sender TEXT, subject TEXT, raw_message BLOB, is_read INTEGER, read_at TEXT, extraction_error TEXT);
+            CREATE TABLE listings (source_signature TEXT, url TEXT, title TEXT, source_subject TEXT, room_count INTEGER, is_read INTEGER, read_at TEXT);
+            CREATE TABLE resolved_listings (id INTEGER PRIMARY KEY, source_signature TEXT, source_url TEXT, resolved_url TEXT, title TEXT, room_count INTEGER, read_at TEXT);
+            """
+        )
+        connection.execute("INSERT INTO seen_emails VALUES ('email', '<id>', 'alerts@stekkies.com', 'Listings', X'01', 1, '2026-01-01 10:00:00', NULL)")
+        connection.execute("INSERT INTO listings VALUES ('email', 'https://stekkies.test/1', 'View match', 'Listings', 2, 1, '2026-01-01 10:01:00')")
+        connection.execute("INSERT INTO resolved_listings VALUES (1, 'email', 'https://stekkies.test/1', 'https://provider.test/1', 'View match', 2, '2026-01-01 10:02:00')")
+
+    database = PipelineDatabase(path)
+
+    assert database.listing_details_for_provider_url("https://provider.test/1").room_count == 2
+    with sqlite3.connect(path) as connection:
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert {"emails", "stekkies_links", "provider_listings", "screenshots", "error_summaries"} <= tables
+    assert "seen_emails" not in tables
 
 
 def test_room_count_flows_from_listing_to_resolved_and_application_work(tmp_path) -> None:

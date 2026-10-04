@@ -2,7 +2,8 @@
 email: "you@yahoo.com"
 password: "your-yahoo-app-password"
 
-# One SQLite database containing the email, listings, and resolved-listings queues.
+# One SQLite file contains emails, Stekkies links, provider listings,
+# screenshots, and derived error summaries.
 database: "data/pipeline.sqlite3"
 
 # Used only by the provider-form worker. Keep the real values in the ignored

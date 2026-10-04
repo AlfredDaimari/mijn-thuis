@@ -26,7 +26,7 @@ The directory is persistent across container recreation. Directory listing is
 disabled and responses are marked `Cache-Control: private, no-store`. Before
 the dashboard is exposed, the same Nginx Basic Auth realm must protect `/`,
 `/api/`, and `/screenshots/`; HTTPS must be live first. The API should return
-only stored Nginx-relative screenshot paths from `application_screenshots`.
+only stored Nginx-relative screenshot paths from `screenshots`.
 
 ## Deployment prerequisite
 

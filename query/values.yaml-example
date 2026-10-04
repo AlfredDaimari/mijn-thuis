@@ -2,7 +2,8 @@
 # Yahoo password. Keep this file private; values.yaml is Git-ignored.
 email: "you@yahoo.com"
 password: "your-yahoo-app-password"
-# One SQLite file holds the email, listings, and resolved-listings queues.
+# One SQLite file contains emails, Stekkies links, provider listings,
+# screenshots, and derived error summaries.
 database: "data/pipeline.sqlite3"
 # Provider-form profile. Keep the real values in ignored values.yaml.
 applicant:

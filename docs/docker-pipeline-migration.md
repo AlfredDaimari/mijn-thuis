@@ -1,224 +1,125 @@
-# Docker pipeline migration guide
+# Docker pipeline and database design
 
 ## Goal
 
-Run the housing workflow as four independently restartable containers on the
-same Docker host. They share one local SQLite pipeline database, while browser
-screenshots live in `/srv/house-bot/screenshots`, a persistent host bind mount
-served by Nginx.
-
-This is deliberately a **single-host** design. It is the appropriate shape for
-the existing OVH VPS and low-volume workflow. Do not use this design with a
-network filesystem or with workers spread across Docker hosts.
+Run four independently restartable workers on one OVH VPS. They share a local
+SQLite/WAL file at `/app/data/pipeline.sqlite3`; browser screenshots live in
+`/srv/house-bot/screenshots` and are served by Nginx. This is deliberately a
+single-host design—never mount its SQLite volume over NFS, SMB, or another
+network filesystem.
 
 ```text
-                            house-query-data volume
-                         /app/data/pipeline.sqlite3
+Yahoo poller ──> emails ──> extractor ──> stekkies_links ──> resolver
+                                                              │
+                                                              v
+                                                    provider_listings
+                                                              │
+                                                              v
+                                                   screenshots (Nginx files)
 
- Yahoo poller ───> seen_emails ───> Stekkies extractor ───> listings
-                                                               |
-                                                               v
-                                      Chromium resolver <── Stekkies links
-                                                               |
-                                                               v
-                                                        resolved_listings
-                                                               |
-                             listing_details <───────────────┘
-                                                               |
-                                                               v
-                                    Provider application worker (Chromium)
-                                                               |
-                          applications / application_screenshots / pipeline_errors
-                                                               |
-                                                               v
-              /srv/house-bot/screenshots  <── screenshots and Nginx /screenshots/
+emails / stekkies_links / provider_listings ──> error_summaries (derived every 2h)
 ```
 
-The frontend must use a backend API for application state and screenshots. A
-browser must not mount or query the SQLite database directly. See
-[`frontend.md`](frontend.md) for the UI, Basic Authentication, HTTPS, and
-cursor-pagination plan.
+The frontend must use a backend API; it never mounts the SQLite volume or
+reads screenshots from the filesystem directly. See [frontend.md](frontend.md)
+for the dashboard, authentication, HTTPS, and pagination plan.
 
-## Current baseline
+## Database: five deliberately small tables
 
-`query/` provides four independent worker commands:
+| Table | Source of truth | Key fields |
+| --- | --- | --- |
+| `emails` | A Yahoo message fetched by the poller. | `id`, unique `signature`, optional unique `message_id`, raw email, `accessed_at`, `processing_state`, `processed_at`, `processing_error`. |
+| `stekkies_links` | One actionable Stekkies link extracted from an email. | `id`, `email_id`, unique `(email_id, stekkies_url)`, optional `provider_listing_id`, title/room count, processing outcome and error. |
+| `provider_listings` | One canonical provider URL: the actual house/application record. | `id`, unique `provider_url`, provider details, application `processing_state`, retries/lease, local error, and latest `screenshot_id`. |
+| `screenshots` | Immutable browser evidence for a provider listing attempt. | `id`, `provider_listing_id`, attempt number, stage, Nginx-relative path, capture time. |
+| `error_summaries` | A rebuildable observability projection, not a worker error log. | source table, error fingerprint/message, count, first/last failure, refresh time. |
 
-| Worker | Command | Input | Durable output |
+Only `emails`, `stekkies_links`, and `provider_listings` own error messages.
+Their failures are directly inspectable at row level. `error_summaries` is
+periodically regenerated from those three tables so the observability UI can
+show a quick error count without scanning all history.
+
+Processing states are explicit:
+
+- Emails: `pending`, `succeeded`, or `failed`.
+- Stekkies links: `pending`, `succeeded`, or `failed`.
+- Provider listings: `pending`, `processing`, `awaiting_review`, `submitted`,
+  or `failed`.
+
+`processed_at` is set on every success or failure. A `failed` row must have a
+non-empty `processing_error`; successful and pending rows must not. Queue
+queries use `(processing_state, id)` indexes, so workers find pending work
+without scanning completed history.
+
+The prior `seen_emails`, `listings`, `resolved_listings`, `applications`,
+`listing_details`, `application_screenshots`, `provider_sources`, and
+`pipeline_errors` tables are migrated at startup in one transaction into this
+model and then removed. The migration preserves the raw messages, links,
+provider URL, available details, state, and failure information. New code must
+only use the five tables above.
+
+## Worker responsibilities
+
+| Worker | Command | Reads | Writes |
 | --- | --- | --- | --- |
-| Yahoo poller | `python -m query_service` | Yahoo IMAP | `seen_emails` |
-| Listing extractor | `python -m query_service.processor` | `seen_emails` | `listings` |
-| Stekkies resolver | `python -m query_service.resolver` | `listings` | `resolved_listings` |
-| Provider review worker | `python -m query_service.application_worker` | `resolved_listings` | `applications` + screenshot |
+| Yahoo poller | `python -m query_service` | Yahoo IMAP | inserts `emails` as `pending` |
+| Extractor | `python -m query_service.processor` | pending `emails` | inserts `stekkies_links`, marks email succeeded/failed |
+| Resolver | `python -m query_service.resolver` | pending/failed `stekkies_links` | inserts/links a `provider_listings` row, marks link succeeded/failed |
+| Provider review worker | `python -m query_service.application_worker` | pending/failed `provider_listings` | claims the row, fills/captures evidence, updates state/error and `screenshots` |
 
-All pipeline tables are in `pipeline.sqlite3`. `PipelineDatabase` keeps SQL in one
-place, opens a short-lived connection per operation, turns on WAL mode, and
-uses a busy timeout plus retry for brief write contention. The extractor and
-resolver already make their queue handoff atomic: write the downstream record
-and mark the source record read in the same transaction. The provider review
-worker atomically claims a resolved listing with a finite lease, captures a
-screenshot, and stops at `awaiting_review`; it does not submit forms.
+Each handoff is one short SQLite transaction: create or find the downstream
+row, then mark the source row successful. No transaction is held during IMAP,
+Playwright navigation, provider login, or screenshot capture.
 
-During resolution, conservative extraction records a provider page title,
-explicitly labelled location, monthly rent in euro cents, floor area in square
-metres, and room count in `listing_details`, keyed by `resolved_listings.id`.
-Unknown values remain `NULL`; the pipeline intentionally does not guess from
-an unlabelled price or address. `application_screenshots` records each durable
-Nginx-relative evidence path by resolved-listing ID and stage (`capture`,
-`before_fill`, `after_fill`, `before_submit`, or `after_submit`).
-`pipeline_errors` coalesces identical safe worker failures while queue-specific
-fields such as `applications.error` remain the source of retry state.
+The resolver may extract explicit provider title, location, rent in cents,
+area, and room count into the provider-listing row. Unknown values stay `NULL`;
+the service must not invent data from an unlabelled price or address.
 
-## Docker topology
+The provider worker is still **no-submit**. It may reach `awaiting_review`, but
+only a later reviewed submission capability may write `submitted`.
 
-Use one named volume for SQLite and one shared host directory for screenshots:
+## Screenshots
 
-```text
-house-query-data  -> /app/data       (read/write in every worker)
-/srv/house-bot/screenshots -> /app/screenshots (read/write in the application worker)
+The worker saves a file atomically under `/app/screenshots`, which is the host
+directory `/srv/house-bot/screenshots`. It then records a `screenshots` row in
+the same short transaction that updates `provider_listings.screenshot_id`.
+
+Each screenshot is linked to a provider listing, an attempt count, and a stage:
+`capture`, `before_fill`, `after_fill`, `before_submit`, `after_submit`, or
+`failure`. Multiple attempts retain their earlier evidence rather than
+overwriting it. Nginx paths must be `/screenshots/<safe-file-name>` only.
+
+## Error summaries
+
+Run the lightweight summarizer every two hours, separately from the four live
+pipeline workers:
+
+```bash
+python -m query_service.error_summary --config values.yaml --once
 ```
 
-Every worker receives the same mounted, read-only `values.yaml` (or equivalent
-Docker secret) and must configure its database as:
+`query/run-error-summary.sh` is a convenience wrapper for this one-shot
+command; schedule that script with the host scheduler at a two-hour interval.
 
-```yaml
-database: "/app/data/pipeline.sqlite3"
+For a continuous local scheduler, it defaults to two hours:
+
+```bash
+python -m query_service.error_summary --config values.yaml
 ```
 
-The application worker additionally mounts ignored `accounts.yaml`. Copy
-`query/accounts.yaml-template` and include only provider accounts you own. The
-credentials never leave Playwright and are never sent to OpenRouter.
+It deletes and rebuilds `error_summaries` from the three source tables in one
+transaction. It does not modify pipeline state, retry a failed listing, or
+store credentials, cookies, raw email bodies, or application messages.
 
-All four services share the `house-query-service` image and differ only by
-command. Split an application worker into a separate image only when its
-dependencies or release cadence genuinely diverge; image count is not a
-service boundary.
+## SQLite and deployment rules
 
-`docker-compose.yml` defines the four services individually. It uses the local
-named `house-query-data` volume, a `/srv/house-bot/screenshots` bind mount,
-read-only `values.yaml`, restart policies, `--init`, and memory/shared-memory
-limits for the Chromium workers. Start all four with `docker compose up -d --build`.
-
-Run exactly one replica of each worker initially. Use Docker restart policies
-and `--init` (or their Compose equivalents) so SIGINT/SIGTERM reaches Python
-and Chromium. Containers must not rely on writable state in their own
-filesystems.
-
-## SQLite rules
-
-Multiple containers can safely access the same SQLite database **when all of
-them are on this VPS and the named volume is backed by its local filesystem**.
-WAL supports concurrent readers and one writer. It does not allow concurrent
-write transactions; that is acceptable here because each database write is
-small and the existing retry policy handles temporary lock contention.
-
-These restrictions are mandatory:
-
-- Do not mount `house-query-data` from NFS, SMB/CIFS, object-storage FUSE, or
-  another network filesystem.
-- Do not run these SQLite-backed containers on different Docker hosts.
-- Mount `/app/data` read/write, not the database file alone. SQLite needs the
-  adjacent `pipeline.sqlite3-wal` and `pipeline.sqlite3-shm` files.
-- Do not hold a database transaction while calling IMAP or driving Chromium.
-  Claim/read work, close the transaction, perform network/browser work, then
-  open a short transaction to record the result.
-- Back up with SQLite's online backup mechanism, or stop all writers first.
-  Never copy just `pipeline.sqlite3` while it is live.
-
-## Provider-application worker
-
-The fourth worker consumes `resolved_listings`. Its current responsibility is
-to open the provider URL, save a screenshot, and record `awaiting_review`.
-It deliberately does not complete or submit an application.
-
-Add application-domain tables and database-layer methods in
-`query_service/database.py` rather than writing SQL inside browser code. A
-minimal durable model needs:
-
-| Field / concept | Purpose |
-| --- | --- |
-| source identity | A unique reference to the resolved listing being applied to. |
-| provider URL | The exact destination visited. |
-| status | `pending`, `processing`, `awaiting_review`, `submitted`, or `failed`. |
-| lease expiry | Allows recovery when a worker dies after claiming work. |
-| attempt count and error | Makes retry behaviour visible and bounded. |
-| screenshot catalogue | `application_screenshots` links each resolved-listing ID and capture stage to an Nginx-relative `/screenshots/...` path, never to a container-local path. |
-| display details | `listing_details` holds optional provider title, location, rent cents, area, and refined room count once per resolved listing. |
-| worker errors | `pipeline_errors` holds deduplicated safe diagnostics for operational visibility; do not store secrets, raw emails, or form values. |
-| timestamps | Records creation, claim, completion, and review/submission time. |
-
-The worker must use this sequence:
-
-1. Atomically create or claim one application row from an unread
-   `resolved_listings` item, set a finite lease, and increment its attempt
-   count. This transaction must also acknowledge the resolved-listing queue
-   item only when the application row was made durable.
-2. Close the SQLite connection.
-3. Use Chromium to visit the provider site without filling or submitting a form.
-4. Save each screenshot atomically: write a temporary file under the screenshot
-   volume, then rename it to its final stable name.
-5. In a short transaction, record the screenshot stage and Nginx-relative path
-   plus final status. On a
-   browser failure, record a retryable `failed` state with diagnostic context;
-   do not silently discard the item.
-
-The processor records a room count from each listing email when present; the
-resolver may refine it from visible provider-page text. The value is carried
-through `listings`, `resolved_listings`, and `applications`. The application
-worker selects `message_single_person` for one-room (or unknown-room) homes and
-`message_two_person` for homes with more than one room, without logging either
-message body.
-
-The worker stops at `awaiting_review` before an irreversible provider
-submission. It uses a predefined provider Playwright flow when one is
-registered. Otherwise, generic Dutch/English matching runs first and only a
-failure can trigger the configured OpenRouter model. OpenRouter receives the failure reason and
-redacted visible controls, and can request one validated step at a time (up to
-three per URL). An OpenRouter-requested provider login uses an exact-host credential
-from ignored `accounts.yaml`; a missing entry is stored in `applications.error`.
-The frontend/API can expose the screenshot and an explicit human approval
-action. Automatic submission can be added only as a separately reviewed
-capability with provider-specific safeguards.
-
-## Scaling and recovery
-
-With one worker per stage, the current read-then-ack queue methods are
-sufficient. Before increasing any worker above one replica, implement an
-atomic claim (`pending -> processing`) with a lease and a recovery query for
-expired leases. Without it, two replicas can both process the same row.
-
-At-least-once processing is intentional. Durable uniqueness constraints and
-atomic handoffs must make a restarted worker safe to repeat. Browser activity
-is inherently not transactionally reversible, so every provider interaction
-needs an idempotency strategy where the provider supports one, plus a visible
-reviewable record when it does not.
-
-## Implementation order
-
-1. Keep the existing poller, extractor, and resolver commands unchanged and
-   verify that they all use `/app/data/pipeline.sqlite3`.
-2. Add application tables, migrations, and `PipelineDatabase` methods with
-   unit tests for deduplication, atomic handoff, claim leases, expired-lease
-   recovery, and failure recording.
-3. Add the provider application worker as a new command and container service.
-   Its browser logic must depend on database-layer methods, not direct SQL.
-4. Add the screenshots volume and ensure screenshots survive container
-   recreation.
-5. Add a Basic-Auth protected backend API and frontend that show paginated
-   status, errors, listing details, and screenshots; see `frontend.md`.
-6. Add container orchestration (normally a Compose file) with all workers on
-   the same local Docker host, named volumes, read-only configuration mounts,
-   restart policies, and resource limits for Chromium workers.
-7. Exercise crash recovery by killing each worker during processing and proving
-   that no durable queue item or screenshot reference is lost.
-
-## Acceptance criteria
-
-- Restarting any one worker does not erase pipeline state, screenshots, or
-  credentials.
-- Poller, extractor, resolver, and application worker can run together without
-  unhandled `database is locked` failures.
-- A Chromium worker never keeps a SQLite transaction open during navigation.
-- The same resolved listing cannot produce two active application attempts.
-- Screenshots remain available after the application-worker container is
-  removed and recreated.
-- The frontend has no direct filesystem or SQLite-volume access.
+- Use exactly one replica of each of the four live workers initially.
+- SQLite WAL permits many readers and one short writer. Every data-layer method
+  opens/closes its own connection, sets a busy timeout, and retries brief lock
+  contention.
+- Mount the whole `/app/data` directory, not only `pipeline.sqlite3`, because
+  SQLite needs its `-wal` and `-shm` sidecar files.
+- Back up through SQLite's online backup API, or stop writers first. Never copy
+  only the main database file while workers are active.
+- The error summarizer is a scheduled read/derive task; it is intentionally not
+  a fifth always-running business worker.

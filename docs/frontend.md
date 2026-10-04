@@ -51,12 +51,14 @@ and does not prove the server identity.
 
 | Tab | Data shown | Primary source | Notes |
 | --- | --- | --- | --- |
-| Listings | Every extracted candidate, its queue/application status, provider URL, title, location, rooms, monthly rent, and area. | `listings`, `resolved_listings`, `listing_details`, `applications` | Starts as the main inbox, including unresolved candidates. |
-| Applied | Only rows with `applications.status = submitted`; later include submission timestamp and confirmation evidence. | `applications`, `listing_details`, `application_screenshots` | `awaiting_review` is not an application submission and must not appear as applied. |
-| Evidence | Before-fill, after-fill, before-submit, and after-submit screenshots for one selected legitimate application. | `application_screenshots` | The API returns Nginx-relative image paths only after authenticating the caller. |
-| Failed | At the bottom of the tab, application failures and separate worker/pipeline errors, newest first. | `applications.error`, `pipeline_errors` | Show retry count, timestamp, source URL, and safe diagnostic text; never credentials or raw email. |
+| Listings | Every extracted candidate, its email/link/application state, provider URL, title, location, rooms, monthly rent, and area. | `emails`, `stekkies_links`, `provider_listings` | Starts as the main inbox, including links not yet resolved. |
+| Applied | Only rows with `provider_listings.processing_state = submitted`; later include submission timestamp and confirmation evidence. | `provider_listings`, `screenshots` | `awaiting_review` is not an application submission and must not appear as applied. |
+| Evidence | Before-fill, after-fill, before-submit, and after-submit screenshots for one selected provider listing attempt. | `screenshots` | The API returns Nginx-relative image paths only after authenticating the caller. |
+| Failed | At the bottom of the tab, row-level email/link/provider errors plus their aggregate summary, newest first. | source-table `processing_error` fields and `error_summaries` | Show retry count, timestamp, source URL, and safe diagnostic text; never credentials or raw email. |
 
-Each listing uses the stable `resolved_listings.id` once it has a provider URL.
+Each provider listing uses the stable `provider_listings.id` once resolution
+succeeds. Its optional `screenshot_id` identifies the latest useful evidence;
+the full evidence history is in `screenshots`.
 The UI must label missing provider metadata as “Unknown”, rather than inferring
 or fabricating a location, price, or room count.
 
@@ -68,15 +70,15 @@ server-side cursor pagination, never a database dump into the browser.
 
 | Endpoint | Cursor sort | Page size | Response fields |
 | --- | --- | --- | --- |
-| `GET /api/listings` | `(created_at DESC, resolved_listing_id DESC)` | default 25, max 100 | `items`, `next_cursor` |
-| `GET /api/applications?status=submitted` | `(completed_at DESC, resolved_listing_id DESC)` | default 25, max 100 | `items`, `next_cursor` |
-| `GET /api/applications/{resolved_listing_id}/screenshots` | `(captured_at ASC, screenshot_id ASC)` | default 25, max 100 | `items`, `next_cursor` |
-| `GET /api/failures` | `(last_occurred_at DESC, error_key DESC)` | default 25, max 100 | `items`, `next_cursor` |
+| `GET /api/listings` | `(accessed_at DESC, provider_listing_id DESC)` | default 25, max 100 | `items`, `next_cursor` |
+| `GET /api/applications?status=submitted` | `(processed_at DESC, provider_listing_id DESC)` | default 25, max 100 | `items`, `next_cursor` |
+| `GET /api/provider-listings/{provider_listing_id}/screenshots` | `(captured_at ASC, screenshot_id ASC)` | default 25, max 100 | `items`, `next_cursor` |
+| `GET /api/failures` | `(last_failed_at DESC, source_table, error_fingerprint)` | default 25, max 100 | `items`, `next_cursor` |
 
 The cursor is opaque, URL-safe, and encodes the exact final sort values; it is
 not an offset. This prevents rows being skipped or duplicated when workers add
 new listings while the user is paging. Every query must apply a deterministic
-tie-breaker (`resolved_listing_id`, screenshot ID, or error key) and a matching
+tie-breaker (`provider_listing_id`, screenshot ID, or error fingerprint) and a matching
 SQLite index. The response also carries a small `summary` count for tab badges,
 but pagination controls never depend on totals being exact during active work.
 

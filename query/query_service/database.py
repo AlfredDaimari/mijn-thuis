@@ -1,52 +1,51 @@
-"""SQLite data-access layer for the Stekkies pipeline.
+"""SQLite data access for the small, linear housing pipeline.
 
-The service modules deliberately contain no SQL and never retain a SQLite
-connection.  Every repository operation opens, uses, and closes its own
-connection.  That means the poller, processor, and resolver can run in
-separate threads or processes without accidentally sharing a thread-bound
-``sqlite3.Connection``.
+The durable model deliberately has only three work entities: an email, a
+Stekkies link extracted from it, and the provider listing reached from that
+link. Each entity owns its processing state and failure reason. Screenshots
+belong to provider listings; error summaries are a derived observability view,
+not an additional error source of truth.
 """
 
 from __future__ import annotations
 
 import sqlite3
 import time
-from hashlib import sha256
 from collections.abc import Callable
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import TypeVar
-from urllib.parse import urlparse
 
 from .extractor import ListingDetails
 
 
 Result = TypeVar("Result")
 _LOCK_RETRIES = 6
+_SCREENSHOT_STAGES = {"capture", "before_fill", "after_fill", "before_submit", "after_submit", "failure"}
 
 
 class SQLiteDatabase:
-    """Connection factory with WAL, a busy timeout, and short transactions."""
+    """One local-file connection factory with WAL and short write transactions."""
 
-    def __init__(self, database_path: str | Path, schema: str, migrate: Callable[[sqlite3.Connection], None] | None = None) -> None:
-        self.path = Path(database_path)
+    def __init__(self, path: str | Path, schema: str, migrate: Callable[[sqlite3.Connection], None]) -> None:
+        self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._schema = schema
-        self._migrate = migrate
+        self.schema = schema
+        self.migrate = migrate
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        # ``check_same_thread`` remains enabled.  Safety comes from creating a
-        # connection inside the calling thread for each repository operation.
         connection = sqlite3.connect(self.path, timeout=10)
         connection.execute("PRAGMA busy_timeout = 10000")
+        connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
     @staticmethod
-    def _is_locked(error: sqlite3.OperationalError) -> bool:
+    def _locked(error: sqlite3.OperationalError) -> bool:
         return "locked" in str(error).lower() or "busy" in str(error).lower()
 
-    def _retry(self, operation: Callable[[sqlite3.Connection], Result], *, write: bool) -> Result:
+    def _run(self, operation: Callable[[sqlite3.Connection], Result], *, write: bool) -> Result:
         for attempt in range(_LOCK_RETRIES):
             connection = self._connect()
             try:
@@ -58,7 +57,7 @@ class SQLiteDatabase:
                 return result
             except sqlite3.OperationalError as error:
                 connection.rollback()
-                if not self._is_locked(error) or attempt == _LOCK_RETRIES - 1:
+                if not self._locked(error) or attempt == _LOCK_RETRIES - 1:
                     raise
                 time.sleep(0.02 * (2**attempt))
             except Exception:
@@ -69,269 +68,62 @@ class SQLiteDatabase:
         raise RuntimeError("SQLite retry loop ended unexpectedly")
 
     def _initialize(self) -> None:
-        # SQLite cannot switch an existing database into WAL mode from inside
-        # ``BEGIN IMMEDIATE``. Set the journal mode first, then use the normal
-        # short write transaction for schema creation and migrations.
-        for attempt in range(_LOCK_RETRIES):
-            connection = self._connect()
-            try:
-                connection.execute("PRAGMA journal_mode = WAL")
-                break
-            except sqlite3.OperationalError as error:
-                if not self._is_locked(error) or attempt == _LOCK_RETRIES - 1:
-                    raise
-                time.sleep(0.02 * (2**attempt))
-            finally:
-                connection.close()
-
-        def create_schema(connection: sqlite3.Connection) -> None:
-            connection.executescript(self._schema)
-            if self._migrate:
-                self._migrate(connection)
-
-        self._retry(create_schema, write=True)
+        connection = self._connect()
+        try:
+            connection.execute("PRAGMA journal_mode = WAL")
+        finally:
+            connection.close()
+        self._run(lambda connection: (connection.executescript(self.schema), self.migrate(connection)), write=True)
 
     def read(self, operation: Callable[[sqlite3.Connection], Result]) -> Result:
-        return self._retry(operation, write=False)
+        return self._run(operation, write=False)
 
     def write(self, operation: Callable[[sqlite3.Connection], Result]) -> Result:
-        return self._retry(operation, write=True)
+        return self._run(operation, write=True)
 
 
 @dataclass(frozen=True)
 class PendingEmail:
+    id: int
     signature: str
-    message_id: str
+    message_id: str | None
     sender: str
     subject: str
     raw_message: bytes
 
 
-def _migrate_seen_emails(connection: sqlite3.Connection) -> None:
-    columns = {row[1] for row in connection.execute("PRAGMA table_info(seen_emails)")}
-    additions = {
-        "raw_message": "BLOB",
-        "is_read": "INTEGER NOT NULL DEFAULT 0",
-        "read_at": "TEXT",
-        "extraction_error": "TEXT",
-    }
-    for name, definition in additions.items():
-        if name not in columns:
-            connection.execute(f"ALTER TABLE seen_emails ADD COLUMN {name} {definition}")
-    connection.execute(
-        """
-        UPDATE seen_emails
-        SET is_read = 1,
-            read_at = COALESCE(read_at, CURRENT_TIMESTAMP),
-            extraction_error = COALESCE(extraction_error, 'Raw email unavailable from earlier service version')
-        WHERE raw_message IS NULL AND is_read = 0
-        """
-    )
-    resolved_table_exists = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'resolved_listings'"
-    ).fetchone()
-    if not resolved_table_exists:
-        return
-    resolved_columns = {row[1] for row in connection.execute("PRAGMA table_info(resolved_listings)")}
-    for name, definition in {
-        "id": "INTEGER",
-        "before_fill_screenshot_key": "TEXT",
-        "after_fill_screenshot_key": "TEXT",
-    }.items():
-        if name not in resolved_columns:
-            connection.execute(f"ALTER TABLE resolved_listings ADD COLUMN {name} {definition}")
-    connection.execute("UPDATE resolved_listings SET id = rowid WHERE id IS NULL")
-    connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS resolved_listings_id_idx ON resolved_listings (id)")
-    connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS resolved_listings_url_idx ON resolved_listings (resolved_url)")
-    # These deterministic sort indexes are the backend contract for the
-    # future cursor-paginated dashboard endpoints.
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS resolved_listings_created_id_idx "
-        "ON resolved_listings (created_at DESC, id DESC)"
-    )
-    connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS applications_resolved_url_idx ON applications (resolved_url)")
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS applications_status_completed_url_idx "
-        "ON applications (status, completed_at DESC, resolved_url)"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS application_screenshots_resolved_captured_idx "
-        "ON application_screenshots (resolved_listing_id, captured_at, id)"
-    )
-    for table in ("listings", "resolved_listings", "applications"):
-        columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
-        if "room_count" not in columns:
-            connection.execute(f"ALTER TABLE {table} ADD COLUMN room_count INTEGER")
+@dataclass(frozen=True)
+class StekkiesLink:
+    id: int
+    email_id: int
+    stekkies_url: str
+    title: str | None
+    source_subject: str
+    room_count: int | None
 
-    # ``applications.screenshot_key`` and the two old resolved-listing fields
-    # predate the screenshot catalogue. Retain them for backwards compatibility
-    # while copying actual Nginx-served application captures to the new table.
-    application_columns = {row[1] for row in connection.execute("PRAGMA table_info(applications)")}
-    if "screenshot_key" in application_columns:
-        for resolved_url, screenshot_key in connection.execute(
-            "SELECT resolved_url, screenshot_key FROM applications WHERE screenshot_key IS NOT NULL"
-        ):
-            row = connection.execute(
-                "SELECT id FROM resolved_listings WHERE resolved_url = ?", (resolved_url,)
-            ).fetchone()
-            if row is not None and "/" not in screenshot_key and "\\" not in screenshot_key:
-                connection.execute(
-                    """INSERT OR IGNORE INTO application_screenshots
-                       (resolved_listing_id, stage, nginx_path)
-                       VALUES (?, 'capture', ?)""",
-                    (row[0], f"/screenshots/{screenshot_key}"),
-                )
-
-
-class EmailDatabase:
-    """Data access for the raw-email queue shared by poller and processor."""
-
-    _SCHEMA = """
-        CREATE TABLE IF NOT EXISTS seen_emails (
-            signature TEXT PRIMARY KEY,
-            message_id TEXT,
-            sender TEXT NOT NULL,
-            subject TEXT NOT NULL,
-            raw_message BLOB,
-            is_read INTEGER NOT NULL DEFAULT 0 CHECK (is_read IN (0, 1)),
-            first_read_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            read_at TEXT,
-            extraction_error TEXT
-        );
-        -- Queue reads first filter unread work, then use the stable email ID.
-        CREATE INDEX IF NOT EXISTS seen_emails_unread_signature_idx
-            ON seen_emails (is_read, signature);
-    """
-
-    def __init__(self, database_path: str | Path) -> None:
-        self._database = SQLiteDatabase(database_path, self._SCHEMA, _migrate_seen_emails)
-
-    def remember_if_new(self, signature: str, message_id: str, sender: str, subject: str, raw_message: bytes) -> bool:
-        def insert(connection: sqlite3.Connection) -> bool:
-            cursor = connection.execute(
-                """INSERT OR IGNORE INTO seen_emails
-                   (signature, message_id, sender, subject, raw_message, is_read)
-                   VALUES (?, ?, ?, ?, ?, 0)""",
-                (signature, message_id, sender, subject, raw_message),
-            )
-            return cursor.rowcount == 1
-
-        return self._database.write(insert)
-
-    def unread_emails(self, limit: int = 50) -> list[PendingEmail]:
-        def select(connection: sqlite3.Connection) -> list[PendingEmail]:
-            rows = connection.execute(
-                """SELECT signature, message_id, sender, subject, raw_message
-                   FROM seen_emails WHERE is_read = 0
-                   ORDER BY signature LIMIT ?""",
-                (limit,),
-            ).fetchall()
-            return [PendingEmail(*row) for row in rows if row[4] is not None]
-
-        return self._database.read(select)
-
-    def mark_read(self, signature: str, extraction_error: str | None = None) -> None:
-        self._database.write(
-            lambda connection: connection.execute(
-                """UPDATE seen_emails
-                   SET is_read = 1, read_at = CURRENT_TIMESTAMP, extraction_error = ?
-                   WHERE signature = ?""",
-                (extraction_error, signature),
-            )
-        )
-
-    def mark_unread(self, signature: str) -> None:
-        self._database.write(
-            lambda connection: connection.execute(
-                """UPDATE seen_emails
-                   SET is_read = 0, read_at = NULL, extraction_error = NULL
-                   WHERE signature = ?""",
-                (signature,),
-            )
-        )
+    @property
+    def url(self) -> str:
+        """Compatibility spelling while worker code moves to ``stekkies_url``."""
+        return self.stekkies_url
 
 
 @dataclass(frozen=True)
-class QueuedListing:
-    source_signature: str
-    url: str
+class ProviderListingWork:
+    id: int
+    provider_url: str
     title: str | None
-    source_subject: str
-    room_count: int | None = None
+    room_count: int | None
+    attempt_count: int
+
+    @property
+    def resolved_url(self) -> str:
+        """Compatibility spelling while worker code moves to ``provider_url``."""
+        return self.provider_url
 
 
-class ListingDatabase:
-    """Data access for extracted listings awaiting browser resolution."""
-
-    _SCHEMA = """
-        CREATE TABLE IF NOT EXISTS listings (
-            source_signature TEXT NOT NULL,
-            url TEXT NOT NULL,
-            title TEXT,
-            source_subject TEXT NOT NULL,
-            room_count INTEGER CHECK (room_count IS NULL OR room_count > 0),
-            is_read INTEGER NOT NULL DEFAULT 0 CHECK (is_read IN (0, 1)),
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            read_at TEXT,
-            PRIMARY KEY (source_signature, url)
-        );
-        -- Queue reads first filter unread work, then use the listing ID.
-        CREATE INDEX IF NOT EXISTS listings_unread_source_url_idx
-            ON listings (is_read, source_signature, url);
-    """
-
-    def __init__(self, database_path: str | Path) -> None:
-        self._database = SQLiteDatabase(database_path, self._SCHEMA)
-
-    def add_if_new(self, source_signature: str, url: str, title: str | None, source_subject: str, room_count: int | None = None) -> bool:
-        def insert(connection: sqlite3.Connection) -> bool:
-            cursor = connection.execute(
-                """INSERT OR IGNORE INTO listings
-                   (source_signature, url, title, source_subject, room_count, is_read)
-                   VALUES (?, ?, ?, ?, ?, 0)""",
-                (source_signature, url, title, source_subject, room_count),
-            )
-            return cursor.rowcount == 1
-
-        return self._database.write(insert)
-
-    def unread_listings(self, limit: int = 50) -> list[QueuedListing]:
-        return self._database.read(
-            lambda connection: [
-                QueuedListing(*row)
-                for row in connection.execute(
-                    """SELECT source_signature, url, title, source_subject, room_count FROM listings
-                       WHERE is_read = 0 ORDER BY source_signature, url LIMIT ?""",
-                    (limit,),
-                ).fetchall()
-            ]
-        )
-
-    def mark_read(self, source_signature: str, url: str) -> None:
-        self._set_read(source_signature, url, True)
-
-    def mark_unread(self, source_signature: str, url: str) -> None:
-        self._set_read(source_signature, url, False)
-
-    def _set_read(self, source_signature: str, url: str, is_read: bool) -> None:
-        self._database.write(
-            lambda connection: connection.execute(
-                """UPDATE listings
-                   SET is_read = ?, read_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END
-                   WHERE source_signature = ? AND url = ?""",
-                (int(is_read), int(is_read), source_signature, url),
-            )
-        )
-
-
-@dataclass(frozen=True)
-class ResolvedListing:
-    source_signature: str
-    source_url: str
-    resolved_url: str
-    title: str | None
-    source_subject: str
-    room_count: int | None = None
+# Renamed in the schema; the alias keeps the worker import stable during this
+# focused database migration.
+ApplicationWork = ProviderListingWork
 
 
 @dataclass(frozen=True)
@@ -342,9 +134,7 @@ class ResolvedCandidate:
 
 @dataclass(frozen=True)
 class StoredListingDetails:
-    """Provider facts available to the future frontend/API."""
-
-    resolved_listing_id: int
+    provider_listing_id: int
     provider_title: str | None
     location: str | None
     monthly_rent_cents: int | None
@@ -353,715 +143,433 @@ class StoredListingDetails:
 
 
 @dataclass(frozen=True)
-class ApplicationScreenshot:
-    """An Nginx-relative image associated with one resolved listing."""
-
-    resolved_listing_id: int
+class Screenshot:
+    id: int
+    provider_listing_id: int
+    attempt_count: int
     stage: str
     nginx_path: str
     captured_at: str
 
 
 @dataclass(frozen=True)
-class PipelineError:
-    """A deduplicated, safe-to-display worker failure."""
-
-    error_key: str
-    stage: str
-    source_signature: str | None
-    source_url: str | None
-    resolved_url: str | None
-    message: str
-    occurrence_count: int
-    first_occurred_at: str
-    last_occurred_at: str
+class ErrorSummary:
+    source_table: str
+    error_fingerprint: str
+    error_message: str
+    error_count: int
+    first_failed_at: str
+    last_failed_at: str
+    refreshed_at: str
 
 
-@dataclass(frozen=True)
-class ProviderSource:
-    host: str
-    resolved_count: int
-    first_resolved_at: str
-    last_resolved_at: str
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS emails (
+    id INTEGER PRIMARY KEY,
+    signature TEXT NOT NULL UNIQUE,
+    message_id TEXT UNIQUE,
+    sender TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    raw_message BLOB NOT NULL,
+    accessed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    processing_state TEXT NOT NULL DEFAULT 'pending' CHECK (processing_state IN ('pending', 'succeeded', 'failed')),
+    processed_at TEXT,
+    processing_error TEXT,
+    CHECK ((processing_state = 'failed') = (processing_error IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS emails_processing_id_idx ON emails (processing_state, id);
+
+CREATE TABLE IF NOT EXISTS stekkies_links (
+    id INTEGER PRIMARY KEY,
+    email_id INTEGER NOT NULL REFERENCES emails(id) ON DELETE CASCADE,
+    stekkies_url TEXT NOT NULL,
+    title TEXT,
+    source_subject TEXT NOT NULL,
+    room_count INTEGER CHECK (room_count IS NULL OR room_count > 0),
+    provider_listing_id INTEGER REFERENCES provider_listings(id),
+    accessed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    processing_state TEXT NOT NULL DEFAULT 'pending' CHECK (processing_state IN ('pending', 'succeeded', 'failed')),
+    processed_at TEXT,
+    processing_error TEXT,
+    CHECK ((processing_state = 'failed') = (processing_error IS NOT NULL)),
+    UNIQUE (email_id, stekkies_url)
+);
+CREATE INDEX IF NOT EXISTS stekkies_links_processing_id_idx ON stekkies_links (processing_state, id);
+
+CREATE TABLE IF NOT EXISTS provider_listings (
+    id INTEGER PRIMARY KEY,
+    provider_url TEXT NOT NULL UNIQUE,
+    provider_title TEXT,
+    location TEXT,
+    monthly_rent_cents INTEGER CHECK (monthly_rent_cents IS NULL OR monthly_rent_cents > 0),
+    area_m2 INTEGER CHECK (area_m2 IS NULL OR area_m2 > 0),
+    room_count INTEGER CHECK (room_count IS NULL OR room_count > 0),
+    accessed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    processing_state TEXT NOT NULL DEFAULT 'pending' CHECK (processing_state IN ('pending', 'processing', 'awaiting_review', 'submitted', 'failed')),
+    processed_at TEXT,
+    processing_error TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    lease_expires_at TEXT,
+    screenshot_id INTEGER REFERENCES screenshots(id),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK ((processing_state = 'failed') = (processing_error IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS provider_listings_processing_id_idx ON provider_listings (processing_state, id);
+CREATE INDEX IF NOT EXISTS provider_listings_accessed_id_idx ON provider_listings (accessed_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS provider_listings_state_processed_id_idx ON provider_listings (processing_state, processed_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS screenshots (
+    id INTEGER PRIMARY KEY,
+    provider_listing_id INTEGER NOT NULL REFERENCES provider_listings(id) ON DELETE CASCADE,
+    attempt_count INTEGER NOT NULL CHECK (attempt_count > 0),
+    stage TEXT NOT NULL CHECK (stage IN ('capture', 'before_fill', 'after_fill', 'before_submit', 'after_submit', 'failure')),
+    nginx_path TEXT NOT NULL CHECK (nginx_path GLOB '/screenshots/*'),
+    captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (provider_listing_id, attempt_count, stage)
+);
+CREATE INDEX IF NOT EXISTS screenshots_listing_capture_idx ON screenshots (provider_listing_id, captured_at, id);
+
+-- Rebuilt periodically from source-table failures; never written by workers.
+CREATE TABLE IF NOT EXISTS error_summaries (
+    source_table TEXT NOT NULL CHECK (source_table IN ('emails', 'stekkies_links', 'provider_listings')),
+    error_fingerprint TEXT NOT NULL,
+    error_message TEXT NOT NULL,
+    error_count INTEGER NOT NULL CHECK (error_count > 0),
+    first_failed_at TEXT NOT NULL,
+    last_failed_at TEXT NOT NULL,
+    refreshed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source_table, error_fingerprint)
+);
+CREATE INDEX IF NOT EXISTS error_summaries_latest_idx ON error_summaries (last_failed_at DESC, source_table, error_fingerprint);
+"""
 
 
-@dataclass(frozen=True)
-class ApplicationWork:
-    """A leased provider-listing visit that awaits human review after capture."""
-
-    source_signature: str
-    source_url: str
-    resolved_url: str
-    title: str | None
-    source_subject: str
-    room_count: int | None
-    attempt_count: int
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    return connection.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone() is not None
 
 
-class ResolvedListingDatabase:
-    """Data access for resolved provider URLs awaiting their next consumer."""
+def _column_exists(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    return column in {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
 
-    _SCHEMA = """
-        CREATE TABLE IF NOT EXISTS resolved_listings (
-            id INTEGER PRIMARY KEY,
-            source_signature TEXT NOT NULL,
-            source_url TEXT NOT NULL,
-            resolved_url TEXT NOT NULL,
-            title TEXT,
-            source_subject TEXT NOT NULL,
-            room_count INTEGER CHECK (room_count IS NULL OR room_count > 0),
-            is_read INTEGER NOT NULL DEFAULT 0 CHECK (is_read IN (0, 1)),
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            read_at TEXT,
-            UNIQUE (source_signature, source_url, resolved_url),
-            UNIQUE (resolved_url)
-        );
-        -- Queue reads first filter unread work, then use the resolved listing ID.
-        CREATE INDEX IF NOT EXISTS resolved_listings_unread_source_url_idx
-            ON resolved_listings (is_read, source_signature, source_url, resolved_url);
-    """
 
-    def __init__(self, database_path: str | Path) -> None:
-        self._database = SQLiteDatabase(database_path, self._SCHEMA)
-
-    def add_if_new(self, listing: QueuedListing, resolved_url: str) -> bool:
-        def insert(connection: sqlite3.Connection) -> bool:
-            cursor = connection.execute(
-                """INSERT OR IGNORE INTO resolved_listings
-                   (id, source_signature, source_url, resolved_url, title, source_subject, room_count, is_read)
-                   VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM resolved_listings), ?, ?, ?, ?, ?, ?, 0)""",
-                (listing.source_signature, listing.url, resolved_url, listing.title, listing.source_subject, listing.room_count),
-            )
-            return cursor.rowcount == 1
-
-        return self._database.write(insert)
-
-    def unread_listings(self, limit: int = 50) -> list[ResolvedListing]:
-        return self._database.read(
-            lambda connection: [
-                ResolvedListing(*row)
-                for row in connection.execute(
-                    """SELECT source_signature, source_url, resolved_url, title, source_subject, room_count
-                       FROM resolved_listings WHERE is_read = 0
-                       ORDER BY source_signature, source_url, resolved_url LIMIT ?""",
-                    (limit,),
-                ).fetchall()
-            ]
+def _migrate_legacy_schema(connection: sqlite3.Connection) -> None:
+    """Copy the previous overlapping schema once, then drop only copied tables."""
+    if not _table_exists(connection, "seen_emails"):
+        return
+    for signature, message_id, sender, subject, raw, is_read, read_at, error in connection.execute(
+        "SELECT signature, message_id, sender, subject, raw_message, is_read, read_at, extraction_error FROM seen_emails"
+    ):
+        state = "failed" if error else "succeeded" if is_read else "pending"
+        connection.execute(
+            """INSERT OR IGNORE INTO emails (signature, message_id, sender, subject, raw_message, processing_state, processed_at, processing_error)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", (signature, message_id, sender, subject, raw or b"", state, read_at, error)
         )
-
-    def mark_read(self, source_signature: str, source_url: str, resolved_url: str) -> None:
-        self._database.write(
-            lambda connection: connection.execute(
-                """UPDATE resolved_listings SET is_read = 1, read_at = CURRENT_TIMESTAMP
-                   WHERE source_signature = ? AND source_url = ? AND resolved_url = ?""",
-                (source_signature, source_url, resolved_url),
+    if _table_exists(connection, "listings"):
+        rooms_column = "room_count" if _column_exists(connection, "listings", "room_count") else "NULL"
+        for signature, url, title, subject, rooms, is_read, read_at in connection.execute(
+            f"SELECT source_signature, url, title, source_subject, {rooms_column}, is_read, read_at FROM listings"
+        ):
+            email = connection.execute("SELECT id FROM emails WHERE signature = ?", (signature,)).fetchone()
+            if email:
+                connection.execute(
+                    """INSERT OR IGNORE INTO stekkies_links (email_id, stekkies_url, title, source_subject, room_count, processing_state, processed_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""", (email[0], url, title, subject, rooms, "succeeded" if is_read else "pending", read_at)
+                )
+    if _table_exists(connection, "resolved_listings"):
+        details = {}
+        if _table_exists(connection, "listing_details"):
+            details = {row[0]: row[1:] for row in connection.execute(
+                "SELECT resolved_listing_id, provider_title, location, monthly_rent_cents, area_m2, room_count FROM listing_details"
+            )}
+        applications = {}
+        if _table_exists(connection, "applications"):
+            applications = {row[2]: row[3:] for row in connection.execute(
+                "SELECT source_signature, source_url, resolved_url, status, attempt_count, error, screenshot_key, completed_at, lease_expires_at FROM applications"
+            )}
+        legacy_provider_ids: dict[int, int] = {}
+        resolved_id_column = "id" if _column_exists(connection, "resolved_listings", "id") else "rowid"
+        resolved_rooms_column = "room_count" if _column_exists(connection, "resolved_listings", "room_count") else "NULL"
+        for legacy_id, signature, source_url, provider_url, title, rooms, read_at in connection.execute(
+            f"SELECT {resolved_id_column}, source_signature, source_url, resolved_url, title, {resolved_rooms_column}, read_at FROM resolved_listings"
+        ):
+            email = connection.execute("SELECT id FROM emails WHERE signature = ?", (signature,)).fetchone()
+            if not email:
+                continue
+            link = connection.execute("SELECT id FROM stekkies_links WHERE email_id = ? AND stekkies_url = ?", (email[0], source_url)).fetchone()
+            if not link:
+                continue
+            meta = details.get(legacy_id, (None, None, None, None, rooms))
+            app = applications.get(provider_url)
+            state = app[0] if app and app[0] in {"pending", "processing", "awaiting_review", "submitted", "failed"} else "pending"
+            connection.execute(
+                """INSERT OR IGNORE INTO provider_listings
+                   (provider_url, provider_title, location, monthly_rent_cents, area_m2, room_count, processing_state, processed_at, processing_error, attempt_count, lease_expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (provider_url, meta[0] or title, meta[1], meta[2], meta[3], meta[4] or rooms,
+                 state, app[4] if app else read_at, app[2] if app and state == "failed" else None,
+                 app[1] if app else 0, app[5] if app else None),
             )
+            provider = connection.execute("SELECT id FROM provider_listings WHERE provider_url = ?", (provider_url,)).fetchone()
+            legacy_provider_ids[legacy_id] = provider[0]
+            connection.execute(
+                """UPDATE stekkies_links SET provider_listing_id = ?, processing_state = 'succeeded',
+                   processed_at = COALESCE(processed_at, ?) WHERE id = ?""", (provider[0], read_at, link[0])
+            )
+        if _table_exists(connection, "application_screenshots"):
+            for legacy_id, stage, nginx_path, captured_at in connection.execute(
+                "SELECT resolved_listing_id, stage, nginx_path, captured_at FROM application_screenshots"
+            ):
+                provider_id = legacy_provider_ids.get(legacy_id)
+                if provider_id is None or stage not in _SCREENSHOT_STAGES:
+                    continue
+                connection.execute(
+                    """INSERT OR IGNORE INTO screenshots
+                       (provider_listing_id, attempt_count, stage, nginx_path, captured_at)
+                       VALUES (?, 1, ?, ?, ?)""", (provider_id, stage, nginx_path, captured_at)
+                )
+        for provider_url, app in applications.items():
+            screenshot_key = app[3]
+            if not screenshot_key or "/" in screenshot_key or "\\" in screenshot_key:
+                continue
+            provider = connection.execute("SELECT id FROM provider_listings WHERE provider_url = ?", (provider_url,)).fetchone()
+            if provider:
+                connection.execute(
+                    """INSERT OR IGNORE INTO screenshots
+                       (provider_listing_id, attempt_count, stage, nginx_path)
+                       VALUES (?, 1, 'capture', ?)""", (provider[0], f"/screenshots/{screenshot_key}")
+                )
+        connection.execute(
+            """UPDATE provider_listings SET screenshot_id = (
+                 SELECT s.id FROM screenshots AS s WHERE s.provider_listing_id = provider_listings.id
+                 ORDER BY s.captured_at DESC, s.id DESC LIMIT 1
+               ) WHERE screenshot_id IS NULL"""
         )
+    for table in ("application_screenshots", "pipeline_errors", "provider_sources", "applications", "listing_details", "resolved_listings", "listings", "seen_emails"):
+        if _table_exists(connection, table):
+            connection.execute(f"DROP TABLE {table}")
 
 
 class PipelineDatabase:
-    """One SQLite database containing all durable pipeline queues.
-
-    Queue handoffs use one write transaction, so an output record and its
-    source's read state change together.  The service modules only call these
-    methods; SQL remains confined to this data-access layer.
-    """
-
-    _APPLICATION_SCHEMA = """
-        CREATE TABLE IF NOT EXISTS provider_sources (
-            host TEXT PRIMARY KEY,
-            resolved_count INTEGER NOT NULL DEFAULT 0,
-            first_resolved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            last_resolved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS applications (
-            source_signature TEXT NOT NULL,
-            source_url TEXT NOT NULL,
-            resolved_url TEXT NOT NULL,
-            title TEXT,
-            source_subject TEXT NOT NULL,
-            room_count INTEGER CHECK (room_count IS NULL OR room_count > 0),
-            status TEXT NOT NULL CHECK (status IN (
-                'pending', 'processing', 'awaiting_review', 'submitted', 'failed'
-            )),
-            lease_expires_at TEXT,
-            attempt_count INTEGER NOT NULL DEFAULT 0,
-            error TEXT,
-            screenshot_key TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            claimed_at TEXT,
-            completed_at TEXT,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (source_signature, source_url, resolved_url)
-        );
-        CREATE INDEX IF NOT EXISTS applications_status_lease_idx
-            ON applications (status, lease_expires_at, source_signature, source_url, resolved_url);
-        -- A provider URL identifies one house in this pipeline. This adds a
-        -- database-enforced guard beyond resolved-listing deduplication.
-        CREATE UNIQUE INDEX IF NOT EXISTS applications_resolved_url_idx
-            ON applications (resolved_url);
-        -- Details are intentionally normalized rather than copied across each
-        -- queue. A future API joins them by the stable resolved-listing ID.
-        CREATE TABLE IF NOT EXISTS listing_details (
-            resolved_listing_id INTEGER PRIMARY KEY,
-            provider_title TEXT,
-            location TEXT,
-            monthly_rent_cents INTEGER CHECK (
-                monthly_rent_cents IS NULL OR monthly_rent_cents > 0
-            ),
-            area_m2 INTEGER CHECK (area_m2 IS NULL OR area_m2 > 0),
-            room_count INTEGER CHECK (room_count IS NULL OR room_count > 0),
-            extracted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (resolved_listing_id) REFERENCES resolved_listings(id)
-        );
-        CREATE TABLE IF NOT EXISTS application_screenshots (
-            id INTEGER PRIMARY KEY,
-            resolved_listing_id INTEGER NOT NULL,
-            stage TEXT NOT NULL CHECK (stage IN (
-                'capture', 'before_fill', 'after_fill', 'before_submit',
-                'after_submit', 'failure'
-            )),
-            nginx_path TEXT NOT NULL CHECK (nginx_path GLOB '/screenshots/*'),
-            captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (resolved_listing_id) REFERENCES resolved_listings(id),
-            UNIQUE (resolved_listing_id, stage)
-        );
-        CREATE INDEX IF NOT EXISTS application_screenshots_resolved_stage_idx
-            ON application_screenshots (resolved_listing_id, stage);
-        -- Workers record safe diagnostic context here in addition to their
-        -- queue-specific error fields. Repeated identical failures coalesce.
-        CREATE TABLE IF NOT EXISTS pipeline_errors (
-            error_key TEXT PRIMARY KEY,
-            stage TEXT NOT NULL,
-            source_signature TEXT,
-            source_url TEXT,
-            resolved_url TEXT,
-            message TEXT NOT NULL,
-            occurrence_count INTEGER NOT NULL DEFAULT 1,
-            first_occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            last_occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE INDEX IF NOT EXISTS pipeline_errors_latest_idx
-            ON pipeline_errors (last_occurred_at DESC, error_key);
-    """
-
-    _SCHEMA = (
-        EmailDatabase._SCHEMA
-        + ListingDatabase._SCHEMA
-        + ResolvedListingDatabase._SCHEMA
-        + _APPLICATION_SCHEMA
-    )
+    """Operations for the email → Stekkies link → provider listing pipeline."""
 
     def __init__(self, database_path: str | Path) -> None:
-        self._database = SQLiteDatabase(database_path, self._SCHEMA, _migrate_seen_emails)
+        self._database = SQLiteDatabase(database_path, _SCHEMA, _migrate_legacy_schema)
 
     def remember_if_new(self, signature: str, message_id: str, sender: str, subject: str, raw_message: bytes) -> bool:
-        def insert(connection: sqlite3.Connection) -> bool:
-            cursor = connection.execute(
-                """INSERT OR IGNORE INTO seen_emails
-                   (signature, message_id, sender, subject, raw_message, is_read)
-                   VALUES (?, ?, ?, ?, ?, 0)""",
-                (signature, message_id, sender, subject, raw_message),
-            )
-            return cursor.rowcount == 1
+        return self._database.write(lambda c: c.execute(
+            "INSERT OR IGNORE INTO emails (signature, message_id, sender, subject, raw_message) VALUES (?, ?, ?, ?, ?)",
+            (signature, message_id or None, sender, subject, raw_message),
+        ).rowcount == 1)
 
-        return self._database.write(insert)
+    def pending_emails(self, limit: int = 50) -> list[PendingEmail]:
+        return self._database.read(lambda c: [PendingEmail(*row) for row in c.execute(
+            "SELECT id, signature, message_id, sender, subject, raw_message FROM emails WHERE processing_state = 'pending' ORDER BY id LIMIT ?", (limit,)
+        ).fetchall()])
 
-    def unread_emails(self, limit: int = 50) -> list[PendingEmail]:
-        return self._database.read(
-            lambda connection: [
-                PendingEmail(*row)
-                for row in connection.execute(
-                    """SELECT signature, message_id, sender, subject, raw_message
-                       FROM seen_emails WHERE is_read = 0
-                       ORDER BY signature LIMIT ?""",
-                    (limit,),
-                ).fetchall()
-                if row[4] is not None
-            ]
-        )
+    unread_emails = pending_emails
 
     def mark_email_read(self, signature: str, extraction_error: str | None = None) -> None:
-        self._database.write(
-            lambda connection: connection.execute(
-                """UPDATE seen_emails
-                   SET is_read = 1, read_at = CURRENT_TIMESTAMP, extraction_error = ?
-                   WHERE signature = ?""",
-                (extraction_error, signature),
-            )
-        )
+        self._database.write(lambda c: c.execute(
+            "UPDATE emails SET processing_state = ?, processed_at = CURRENT_TIMESTAMP, processing_error = ? WHERE signature = ?",
+            ("failed" if extraction_error else "succeeded", extraction_error, signature),
+        ))
 
     def mark_email_unread(self, signature: str) -> None:
-        self._database.write(
-            lambda connection: connection.execute(
-                """UPDATE seen_emails
-                   SET is_read = 0, read_at = NULL, extraction_error = NULL
-                   WHERE signature = ?""",
-                (signature,),
-            )
-        )
+        self._database.write(lambda c: c.execute(
+            "UPDATE emails SET processing_state = 'pending', processed_at = NULL, processing_error = NULL WHERE signature = ?", (signature,)
+        ))
 
-    def add_listings_and_mark_email_read(
-        self, email: PendingEmail, listings: list[tuple[str, str | None, int | None]]
-    ) -> list[QueuedListing]:
-        """Atomically queue extracted listings and acknowledge their email."""
-        def write(connection: sqlite3.Connection) -> list[QueuedListing]:
-            added: list[QueuedListing] = []
-            for url, title, room_count in listings:
-                cursor = connection.execute(
-                    """INSERT OR IGNORE INTO listings
-                       (source_signature, url, title, source_subject, room_count, is_read)
-                       VALUES (?, ?, ?, ?, ?, 0)""",
-                    (email.signature, url, title, email.subject, room_count),
+    def add_links_and_mark_email_processed(self, email: PendingEmail, links: list[tuple[str, str | None, int | None]]) -> list[StekkiesLink]:
+        def write(c: sqlite3.Connection) -> list[StekkiesLink]:
+            added = []
+            for url, title, rooms in links:
+                cursor = c.execute(
+                    "INSERT OR IGNORE INTO stekkies_links (email_id, stekkies_url, title, source_subject, room_count) VALUES (?, ?, ?, ?, ?)",
+                    (email.id, url, title, email.subject, rooms),
                 )
-                if cursor.rowcount == 1:
-                    added.append(QueuedListing(email.signature, url, title, email.subject, room_count))
-            connection.execute(
-                """UPDATE seen_emails
-                   SET is_read = 1, read_at = CURRENT_TIMESTAMP, extraction_error = NULL
-                   WHERE signature = ?""",
-                (email.signature,),
-            )
+                if cursor.rowcount:
+                    added.append(StekkiesLink(c.execute("SELECT last_insert_rowid()").fetchone()[0], email.id, url, title, email.subject, rooms))
+            c.execute("UPDATE emails SET processing_state = 'succeeded', processed_at = CURRENT_TIMESTAMP, processing_error = NULL WHERE id = ?", (email.id,))
             return added
-
         return self._database.write(write)
 
-    def add_listing_if_new(self, source_signature: str, url: str, title: str | None, source_subject: str, room_count: int | None = None) -> bool:
-        def insert(connection: sqlite3.Connection) -> bool:
-            cursor = connection.execute(
-                """INSERT OR IGNORE INTO listings
-                   (source_signature, url, title, source_subject, room_count, is_read)
-                   VALUES (?, ?, ?, ?, ?, 0)""",
-                (source_signature, url, title, source_subject, room_count),
-            )
-            return cursor.rowcount == 1
+    add_listings_and_mark_email_read = add_links_and_mark_email_processed
 
-        return self._database.write(insert)
+    def pending_stekkies_links(self, limit: int = 50) -> list[StekkiesLink]:
+        return self._database.read(lambda c: [StekkiesLink(*row) for row in c.execute(
+            "SELECT id, email_id, stekkies_url, title, source_subject, room_count FROM stekkies_links WHERE processing_state IN ('pending', 'failed') ORDER BY id LIMIT ?", (limit,)
+        ).fetchall()])
 
-    def unread_listings(self, limit: int = 50) -> list[QueuedListing]:
-        return self._database.read(
-            lambda connection: [
-                QueuedListing(*row)
-                for row in connection.execute(
-                    """SELECT source_signature, url, title, source_subject, room_count FROM listings
-                       WHERE is_read = 0 ORDER BY source_signature, url LIMIT ?""",
-                    (limit,),
-                ).fetchall()
-            ]
-        )
+    unread_listings = pending_stekkies_links
 
-    def mark_listing_read(self, source_signature: str, url: str) -> None:
-        self._set_listing_read(source_signature, url, True)
-
-    def mark_listing_unread(self, source_signature: str, url: str) -> None:
-        self._set_listing_read(source_signature, url, False)
-
-    def _set_listing_read(self, source_signature: str, url: str, is_read: bool) -> None:
-        self._database.write(
-            lambda connection: connection.execute(
-                """UPDATE listings
-                   SET is_read = ?, read_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END
-                   WHERE source_signature = ? AND url = ?""",
-                (int(is_read), int(is_read), source_signature, url),
-            )
-        )
-
-    def add_resolved_listing_and_mark_source_read(
-        self,
-        listing: QueuedListing,
-        resolved_url: str,
-        details: ListingDetails | None = None,
-    ) -> bool:
-        """Atomically persist a provider URL, its facts, and source acknowledgement."""
-        def write(connection: sqlite3.Connection) -> bool:
-            cursor = connection.execute(
-                """INSERT OR IGNORE INTO resolved_listings
-                   (source_signature, source_url, resolved_url, title, source_subject, room_count, is_read)
-                   VALUES (?, ?, ?, ?, ?, ?, 0)""",
-                (listing.source_signature, listing.url, resolved_url, listing.title, listing.source_subject, listing.room_count),
-            )
-            resolved_id = connection.execute(
-                "SELECT id FROM resolved_listings WHERE resolved_url = ?", (resolved_url,)
-            ).fetchone()[0]
-            if details is not None:
-                connection.execute(
-                    """INSERT INTO listing_details
-                       (resolved_listing_id, provider_title, location, monthly_rent_cents, area_m2, room_count)
-                       VALUES (?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(resolved_listing_id) DO UPDATE SET
-                         provider_title = COALESCE(excluded.provider_title, listing_details.provider_title),
-                         location = COALESCE(excluded.location, listing_details.location),
-                         monthly_rent_cents = COALESCE(excluded.monthly_rent_cents, listing_details.monthly_rent_cents),
-                         area_m2 = COALESCE(excluded.area_m2, listing_details.area_m2),
-                         room_count = COALESCE(excluded.room_count, listing_details.room_count),
-                         updated_at = CURRENT_TIMESTAMP""",
-                    (
-                        resolved_id,
-                        details.provider_title,
-                        details.location,
-                        details.monthly_rent_cents,
-                        details.area_m2,
-                        details.room_count,
-                    ),
-                )
-            connection.execute(
-                """UPDATE listings SET is_read = 1, read_at = CURRENT_TIMESTAMP
-                   WHERE source_signature = ? AND url = ?""",
-                (listing.source_signature, listing.url),
-            )
-            if cursor.rowcount == 1:
-                host = (urlparse(resolved_url).hostname or "unknown").lower()
-                connection.execute(
-                    """INSERT INTO provider_sources (host, resolved_count)
-                       VALUES (?, 1)
-                       ON CONFLICT(host) DO UPDATE SET resolved_count = resolved_count + 1,
-                         last_resolved_at = CURRENT_TIMESTAMP""",
-                    (host,),
-                )
-            return cursor.rowcount == 1
-
+    def add_listing_if_new(self, signature: str, url: str, title: str | None, subject: str, room_count: int | None = None) -> bool:
+        def write(c: sqlite3.Connection) -> bool:
+            c.execute("INSERT OR IGNORE INTO emails (signature, sender, subject, raw_message, processing_state, processed_at) VALUES (?, 'test@stekkies.test', ?, X'', 'succeeded', CURRENT_TIMESTAMP)", (signature, subject))
+            email_id = c.execute("SELECT id FROM emails WHERE signature = ?", (signature,)).fetchone()[0]
+            return c.execute(
+                "INSERT OR IGNORE INTO stekkies_links (email_id, stekkies_url, title, source_subject, room_count) VALUES (?, ?, ?, ?, ?)",
+                (email_id, url, title, subject, room_count),
+            ).rowcount == 1
         return self._database.write(write)
 
-    def listing_details_for_resolved_url(self, resolved_url: str) -> StoredListingDetails | None:
-        """Return normalized display details by the provider URL."""
-        return self._database.read(
-            lambda connection: (
-                StoredListingDetails(*row)
-                if (
-                    row := connection.execute(
-                        """SELECT d.resolved_listing_id, d.provider_title, d.location,
-                                  d.monthly_rent_cents, d.area_m2, d.room_count
-                           FROM listing_details AS d
-                           JOIN resolved_listings AS r ON r.id = d.resolved_listing_id
-                           WHERE r.resolved_url = ?""",
-                        (resolved_url,),
-                    ).fetchone()
-                )
-                else None
-            )
-        )
+    def add_provider_listing_and_mark_link_processed(self, link: StekkiesLink, provider_url: str, details: ListingDetails | None = None) -> bool:
+        resolved_details = details or ListingDetails(room_count=link.room_count)
 
-    def provider_source_tally(self) -> list[ProviderSource]:
-        """Rank provider domains to decide which adapters deserve automation."""
-        return self._database.read(lambda connection: [ProviderSource(*row) for row in connection.execute(
-            "SELECT host, resolved_count, first_resolved_at, last_resolved_at FROM provider_sources ORDER BY resolved_count DESC, host"
+        def write(c: sqlite3.Connection) -> bool:
+            cursor = c.execute(
+                """INSERT OR IGNORE INTO provider_listings
+                   (provider_url, provider_title, location, monthly_rent_cents, area_m2, room_count)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (provider_url, resolved_details.provider_title or link.title, resolved_details.location, resolved_details.monthly_rent_cents, resolved_details.area_m2, resolved_details.room_count or link.room_count),
+            )
+            provider_id = c.execute("SELECT id FROM provider_listings WHERE provider_url = ?", (provider_url,)).fetchone()[0]
+            c.execute("UPDATE stekkies_links SET provider_listing_id = ?, processing_state = 'succeeded', processed_at = CURRENT_TIMESTAMP, processing_error = NULL WHERE id = ?", (provider_id, link.id))
+            return cursor.rowcount == 1
+        return self._database.write(write)
+
+    add_resolved_listing_and_mark_source_read = add_provider_listing_and_mark_link_processed
+
+    @staticmethod
+    def _safe_error(error: str) -> str:
+        return error.strip()[:2_000] or "Unspecified worker failure"
+
+    def mark_link_failed(self, link_id: int, error: str) -> None:
+        self._database.write(lambda c: c.execute(
+            "UPDATE stekkies_links SET processing_state = 'failed', processed_at = CURRENT_TIMESTAMP, processing_error = ? WHERE id = ?", (self._safe_error(error), link_id)
+        ))
+
+    def mark_listing_read(self, signature: str, stekkies_url: str) -> None:
+        """Test/replay helper: acknowledge one extracted Stekkies link."""
+        self._database.write(lambda c: c.execute(
+            """UPDATE stekkies_links SET processing_state = 'succeeded', processed_at = CURRENT_TIMESTAMP,
+               processing_error = NULL WHERE stekkies_url = ? AND email_id =
+                 (SELECT id FROM emails WHERE signature = ?)""", (stekkies_url, signature)
+        ))
+
+    def unresolved_provider_listings(self, limit: int = 50) -> list[ResolvedCandidate]:
+        return self._database.read(lambda c: [ResolvedCandidate(*row) for row in c.execute(
+            "SELECT id, provider_url FROM provider_listings ORDER BY id LIMIT ?", (limit,)
         ).fetchall()])
 
-    def unread_resolved_listings(self, limit: int = 50) -> list[ResolvedListing]:
-        return self._database.read(
-            lambda connection: [
-                ResolvedListing(*row)
-                for row in connection.execute(
-                    """SELECT source_signature, source_url, resolved_url, title, source_subject, room_count
-                       FROM resolved_listings WHERE is_read = 0
-                       ORDER BY source_signature, source_url, resolved_url LIMIT ?""",
-                    (limit,),
-                ).fetchall()
-            ]
-        )
+    resolved_candidates_for_form_test = unresolved_provider_listings
 
-    def resolved_candidates_for_form_test(self, limit: int = 7) -> list[ResolvedCandidate]:
-        return self._database.read(lambda connection: [ResolvedCandidate(*row) for row in connection.execute(
-            "SELECT id, resolved_url FROM resolved_listings ORDER BY id LIMIT ?", (limit,)
+    def pending_provider_listings(self, limit: int = 50) -> list[ProviderListingWork]:
+        """Provider rows that have reached the final pipeline entity."""
+        return self._database.read(lambda c: [ProviderListingWork(*row) for row in c.execute(
+            "SELECT id, provider_url, provider_title, room_count, attempt_count FROM provider_listings WHERE processing_state = 'pending' ORDER BY id LIMIT ?", (limit,)
         ).fetchall()])
 
-    def record_form_test_evidence(self, resolved_id: int, before: str | None, after: str | None) -> None:
-        """Store dry-run evidence only when it lives in the Nginx screenshot tree."""
-        def write(connection: sqlite3.Connection) -> None:
-            connection.execute(
-                "UPDATE resolved_listings SET before_fill_screenshot_key = ?, after_fill_screenshot_key = ? WHERE id = ?",
-                (before, after, resolved_id),
-            )
+    unread_resolved_listings = pending_provider_listings
+
+    def listing_details_for_provider_url(self, provider_url: str) -> StoredListingDetails | None:
+        return self._database.read(lambda c: StoredListingDetails(*row) if (row := c.execute(
+            "SELECT id, provider_title, location, monthly_rent_cents, area_m2, room_count FROM provider_listings WHERE provider_url = ?", (provider_url,)
+        ).fetchone()) else None)
+
+    listing_details_for_resolved_url = listing_details_for_provider_url
+
+    def claim_next_provider_listing(self, *, lease_seconds: int = 1_800, max_attempts: int = 3) -> ProviderListingWork | None:
+        if lease_seconds <= 0 or max_attempts <= 0:
+            raise ValueError("lease_seconds and max_attempts must be positive")
+        def claim(c: sqlite3.Connection) -> ProviderListingWork | None:
+            c.execute("""UPDATE provider_listings SET processing_state = 'failed', lease_expires_at = NULL,
+                       processing_error = COALESCE(processing_error, 'Worker lease expired before completion'), updated_at = CURRENT_TIMESTAMP
+                       WHERE processing_state = 'processing' AND lease_expires_at <= CURRENT_TIMESTAMP""")
+            row = c.execute(
+                "SELECT id, provider_url, provider_title, room_count, attempt_count FROM provider_listings WHERE processing_state IN ('pending', 'failed') AND attempt_count < ? ORDER BY id LIMIT 1", (max_attempts,)
+            ).fetchone()
+            if row is None:
+                return None
+            c.execute("UPDATE provider_listings SET processing_state = 'processing', attempt_count = attempt_count + 1, lease_expires_at = datetime('now', ?), processing_error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (f"+{lease_seconds} seconds", row[0]))
+            return ProviderListingWork(*row[:4], row[4] + 1)
+        return self._database.write(claim)
+
+    claim_next_application = claim_next_provider_listing
+
+    @staticmethod
+    def _nginx_path(screenshot_key: str) -> str:
+        if not screenshot_key or "/" in screenshot_key or "\\" in screenshot_key:
+            raise ValueError("screenshot_key must be a filename")
+        return f"/screenshots/{screenshot_key}"
+
+    def mark_provider_listing_processed(self, work: ProviderListingWork, screenshot_key: str, *, screenshot_stage: str = "capture") -> None:
+        if screenshot_stage not in _SCREENSHOT_STAGES:
+            raise ValueError("unsupported screenshot stage")
+        def write(c: sqlite3.Connection) -> None:
+            c.execute("""INSERT INTO screenshots (provider_listing_id, attempt_count, stage, nginx_path) VALUES (?, ?, ?, ?)
+                       ON CONFLICT(provider_listing_id, attempt_count, stage) DO UPDATE SET nginx_path = excluded.nginx_path, captured_at = CURRENT_TIMESTAMP""", (work.id, work.attempt_count, screenshot_stage, self._nginx_path(screenshot_key)))
+            screenshot_id = c.execute("SELECT id FROM screenshots WHERE provider_listing_id = ? AND attempt_count = ? AND stage = ?", (work.id, work.attempt_count, screenshot_stage)).fetchone()[0]
+            c.execute("""UPDATE provider_listings SET processing_state = 'awaiting_review', processed_at = CURRENT_TIMESTAMP,
+                       processing_error = NULL, lease_expires_at = NULL, screenshot_id = ?, updated_at = CURRENT_TIMESTAMP
+                       WHERE id = ? AND processing_state = 'processing'""", (screenshot_id, work.id))
+        self._database.write(write)
+
+    mark_application_awaiting_review = mark_provider_listing_processed
+
+    def mark_provider_listing_failed(self, work: ProviderListingWork, error: str) -> None:
+        self._database.write(lambda c: c.execute(
+            "UPDATE provider_listings SET processing_state = 'failed', processed_at = CURRENT_TIMESTAMP, processing_error = ?, lease_expires_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND processing_state = 'processing'", (self._safe_error(error), work.id)
+        ))
+
+    mark_application_failed = mark_provider_listing_failed
+
+    def provider_listing_status(self, provider_url: str) -> str | None:
+        return self._database.read(lambda c: row[0] if (row := c.execute("SELECT processing_state FROM provider_listings WHERE provider_url = ?", (provider_url,)).fetchone()) else None)
+
+    def provider_listing_error(self, provider_url: str) -> str | None:
+        return self._database.read(lambda c: row[0] if (row := c.execute("SELECT processing_error FROM provider_listings WHERE provider_url = ?", (provider_url,)).fetchone()) else None)
+
+    # Method aliases preserve the worker/test API; they do not reintroduce an
+    # applications table or a duplicate application record.
+    def application_status(self, _signature: str, _source_url: str, provider_url: str) -> str | None:
+        return self.provider_listing_status(provider_url)
+
+    def application_error(self, _signature: str, _source_url: str, provider_url: str) -> str | None:
+        return self.provider_listing_error(provider_url)
+
+    def application_count_for_resolved_url(self, provider_url: str) -> int:
+        return self._database.read(lambda c: c.execute("SELECT COUNT(*) FROM provider_listings WHERE provider_url = ?", (provider_url,)).fetchone()[0])
+
+    def screenshots_for_provider_url(self, provider_url: str) -> list[Screenshot]:
+        return self._database.read(lambda c: [Screenshot(*row) for row in c.execute(
+            """SELECT s.id, s.provider_listing_id, s.attempt_count, s.stage, s.nginx_path, s.captured_at FROM screenshots AS s
+               JOIN provider_listings AS p ON p.id = s.provider_listing_id WHERE p.provider_url = ? ORDER BY s.captured_at, s.id""", (provider_url,)
+        ).fetchall()])
+
+    screenshots_for_resolved_url = screenshots_for_provider_url
+
+    def refresh_error_summaries(self) -> int:
+        def write(c: sqlite3.Connection) -> int:
+            rows = []
+            for table in ("emails", "stekkies_links", "provider_listings"):
+                rows.extend((table, *row) for row in c.execute(
+                    f"SELECT processing_error, COUNT(*), MIN(processed_at), MAX(processed_at) FROM {table} WHERE processing_state = 'failed' AND processing_error IS NOT NULL GROUP BY processing_error"
+                ))
+            c.execute("DELETE FROM error_summaries")
+            for source, message, count, first, last in rows:
+                c.execute("INSERT INTO error_summaries (source_table, error_fingerprint, error_message, error_count, first_failed_at, last_failed_at) VALUES (?, ?, ?, ?, ?, ?)", (source, sha256(message.encode()).hexdigest(), message, count, first, last))
+            return len(rows)
+        return self._database.write(write)
+
+    def error_summaries(self, limit: int = 50) -> list[ErrorSummary]:
+        return self._database.read(lambda c: [ErrorSummary(*row) for row in c.execute(
+            "SELECT source_table, error_fingerprint, error_message, error_count, first_failed_at, last_failed_at, refreshed_at FROM error_summaries ORDER BY last_failed_at DESC, source_table, error_fingerprint LIMIT ?", (limit,)
+        ).fetchall()])
+
+    def record_form_test_evidence(self, provider_listing_id: int, before: str | None, after: str | None) -> None:
+        """Attach dry-run evidence only when it is in the Nginx screenshot tree."""
+        def write(c: sqlite3.Connection) -> None:
             for stage, path in (("before_fill", before), ("after_fill", after)):
                 if path and path.startswith("/screenshots/"):
-                    connection.execute(
-                        """INSERT INTO application_screenshots (resolved_listing_id, stage, nginx_path)
-                           VALUES (?, ?, ?)
-                           ON CONFLICT(resolved_listing_id, stage) DO UPDATE SET
-                             nginx_path = excluded.nginx_path, captured_at = CURRENT_TIMESTAMP""",
-                        (resolved_id, stage, path),
+                    c.execute(
+                        """INSERT OR REPLACE INTO screenshots
+                           (provider_listing_id, attempt_count, stage, nginx_path)
+                           VALUES (?, 1, ?, ?)""", (provider_listing_id, stage, path)
                     )
-
         self._database.write(write)
 
     def clear_derived_queues_for_test_replay(self) -> None:
-        """Clear disposable output queues while preserving captured raw emails."""
-        self._database.write(
-            lambda connection: connection.executescript(
-                "DELETE FROM resolved_listings; DELETE FROM listings;"
-            )
-        )
+        self._database.write(lambda c: c.executescript("DELETE FROM screenshots; DELETE FROM stekkies_links; DELETE FROM provider_listings; DELETE FROM error_summaries;"))
 
     def requeue_all_emails_for_test_replay(self) -> None:
-        """Make saved test emails available again without reinserting them."""
-        self._database.write(
-            lambda connection: connection.execute(
-                """UPDATE seen_emails
-                   SET is_read = 0, read_at = NULL, extraction_error = NULL"""
-            )
-        )
-
-    def mark_resolved_listing_read(self, source_signature: str, source_url: str, resolved_url: str) -> None:
-        self._database.write(
-            lambda connection: connection.execute(
-                """UPDATE resolved_listings SET is_read = 1, read_at = CURRENT_TIMESTAMP
-                   WHERE source_signature = ? AND source_url = ? AND resolved_url = ?""",
-                (source_signature, source_url, resolved_url),
-            )
-        )
-
-    def claim_next_application(
-        self, *, lease_seconds: int = 1_800, max_attempts: int = 3
-    ) -> ApplicationWork | None:
-        """Atomically claim one provider visit and lease it to this worker.
-
-        A newly claimed resolved listing is acknowledged in the same
-        transaction that creates its durable application record. Expired
-        leases become retryable failures before another item is claimed.
-        """
-        if lease_seconds <= 0:
-            raise ValueError("lease_seconds must be positive")
-        if max_attempts <= 0:
-            raise ValueError("max_attempts must be positive")
-        lease_modifier = f"+{lease_seconds} seconds"
-
-        def claim(connection: sqlite3.Connection) -> ApplicationWork | None:
-            connection.execute(
-                """UPDATE applications
-                   SET status = 'failed', lease_expires_at = NULL,
-                       error = COALESCE(error, 'Worker lease expired before completion'),
-                       updated_at = CURRENT_TIMESTAMP
-                   WHERE status = 'processing'
-                     AND lease_expires_at <= CURRENT_TIMESTAMP"""
-            )
-            existing = connection.execute(
-                """SELECT source_signature, source_url, resolved_url, title, source_subject, room_count,
-                          attempt_count
-                   FROM applications
-                   WHERE status IN ('pending', 'failed') AND attempt_count < ?
-                   ORDER BY source_signature, source_url, resolved_url
-                   LIMIT 1""",
-                (max_attempts,),
-            ).fetchone()
-            if existing is not None:
-                connection.execute(
-                    """UPDATE applications
-                       SET status = 'processing', attempt_count = attempt_count + 1,
-                           lease_expires_at = datetime('now', ?), claimed_at = CURRENT_TIMESTAMP,
-                           updated_at = CURRENT_TIMESTAMP
-                       WHERE source_signature = ? AND source_url = ? AND resolved_url = ?""",
-                    (lease_modifier, existing[0], existing[1], existing[2]),
-                )
-                return ApplicationWork(*existing[:6], existing[6] + 1)
-
-            resolved = connection.execute(
-                """SELECT source_signature, source_url, resolved_url, title, source_subject, room_count
-                   FROM resolved_listings WHERE is_read = 0
-                   ORDER BY source_signature, source_url, resolved_url LIMIT 1"""
-            ).fetchone()
-            if resolved is None:
-                return None
-            inserted = connection.execute(
-                """INSERT OR IGNORE INTO applications
-                   (source_signature, source_url, resolved_url, title, source_subject, room_count,
-                    status, lease_expires_at, attempt_count, claimed_at)
-                   VALUES (?, ?, ?, ?, ?, ?, 'processing', datetime('now', ?), 1, CURRENT_TIMESTAMP)""",
-                (*resolved, lease_modifier),
-            )
-            connection.execute(
-                """UPDATE resolved_listings SET is_read = 1, read_at = CURRENT_TIMESTAMP
-                   WHERE source_signature = ? AND source_url = ? AND resolved_url = ?""",
-                resolved[:3],
-            )
-            if inserted.rowcount != 1:
-                # An existing application owns this provider URL. Consume the
-                # duplicate queue item without visiting or submitting again.
-                return None
-            return ApplicationWork(*resolved, 1)
-
-        return self._database.write(claim)
-
-    @staticmethod
-    def _nginx_screenshot_path(screenshot_key: str) -> str:
-        """Convert a worker-generated filename into the only public path shape."""
-        if not screenshot_key or "/" in screenshot_key or "\\" in screenshot_key:
-            raise ValueError("screenshot_key must be a filename, not a path")
-        return f"/screenshots/{screenshot_key}"
-
-    @staticmethod
-    def _record_pipeline_error_in_transaction(
-        connection: sqlite3.Connection,
-        *,
-        stage: str,
-        message: str,
-        source_signature: str | None = None,
-        source_url: str | None = None,
-        resolved_url: str | None = None,
-    ) -> None:
-        # No raw emails, cookies, passwords, or form values belong in this
-        # table. Bound the message in case a browser library emits a long trace.
-        message = message.strip()[:2_000] or "Unspecified worker failure"
-        fingerprint = "\n".join((stage, source_signature or "", source_url or "", resolved_url or "", message))
-        error_key = sha256(fingerprint.encode("utf-8")).hexdigest()
-        connection.execute(
-            """INSERT INTO pipeline_errors
-               (error_key, stage, source_signature, source_url, resolved_url, message)
-               VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(error_key) DO UPDATE SET
-                 occurrence_count = pipeline_errors.occurrence_count + 1,
-                 last_occurred_at = CURRENT_TIMESTAMP""",
-            (error_key, stage, source_signature, source_url, resolved_url, message),
-        )
-
-    def record_pipeline_error(
-        self,
-        *,
-        stage: str,
-        message: str,
-        source_signature: str | None = None,
-        source_url: str | None = None,
-        resolved_url: str | None = None,
-    ) -> None:
-        """Persist a deduplicated worker error for operational visibility."""
-        self._database.write(
-            lambda connection: self._record_pipeline_error_in_transaction(
-                connection,
-                stage=stage,
-                message=message,
-                source_signature=source_signature,
-                source_url=source_url,
-                resolved_url=resolved_url,
-            )
-        )
-
-    def recent_pipeline_errors(self, limit: int = 50) -> list[PipelineError]:
-        """Read newest first for the future failed/operational frontend tab."""
-        return self._database.read(
-            lambda connection: [
-                PipelineError(*row)
-                for row in connection.execute(
-                    """SELECT error_key, stage, source_signature, source_url, resolved_url, message,
-                              occurrence_count, first_occurred_at, last_occurred_at
-                       FROM pipeline_errors
-                       ORDER BY last_occurred_at DESC, error_key
-                       LIMIT ?""",
-                    (limit,),
-                ).fetchall()
-            ]
-        )
-
-    def screenshots_for_resolved_url(self, resolved_url: str) -> list[ApplicationScreenshot]:
-        """Return only Nginx-relative evidence paths for a provider listing."""
-        return self._database.read(
-            lambda connection: [
-                ApplicationScreenshot(*row)
-                for row in connection.execute(
-                    """SELECT s.resolved_listing_id, s.stage, s.nginx_path, s.captured_at
-                       FROM application_screenshots AS s
-                       JOIN resolved_listings AS r ON r.id = s.resolved_listing_id
-                       WHERE r.resolved_url = ?
-                       ORDER BY s.captured_at, s.id""",
-                    (resolved_url,),
-                ).fetchall()
-            ]
-        )
-
-    def mark_application_awaiting_review(
-        self, work: ApplicationWork, screenshot_key: str, *, screenshot_stage: str = "capture"
-    ) -> None:
-        """Record browser evidence and stop before any irreversible submission."""
-        if screenshot_stage not in {"capture", "before_fill", "after_fill", "before_submit", "after_submit", "failure"}:
-            raise ValueError("unsupported screenshot stage")
-        nginx_path = self._nginx_screenshot_path(screenshot_key)
-
-        def write(connection: sqlite3.Connection) -> None:
-            connection.execute(
-                """UPDATE applications
-                   SET status = 'awaiting_review', screenshot_key = ?, error = NULL,
-                       lease_expires_at = NULL, completed_at = CURRENT_TIMESTAMP,
-                       updated_at = CURRENT_TIMESTAMP
-                   WHERE source_signature = ? AND source_url = ? AND resolved_url = ?
-                     AND status = 'processing'""",
-                (screenshot_key, work.source_signature, work.source_url, work.resolved_url),
-            )
-            resolved = connection.execute(
-                "SELECT id FROM resolved_listings WHERE resolved_url = ?", (work.resolved_url,)
-            ).fetchone()
-            if resolved is None:
-                raise RuntimeError("application references a missing resolved listing")
-            connection.execute(
-                """INSERT INTO application_screenshots (resolved_listing_id, stage, nginx_path)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(resolved_listing_id, stage) DO UPDATE SET
-                     nginx_path = excluded.nginx_path, captured_at = CURRENT_TIMESTAMP""",
-                (resolved[0], screenshot_stage, nginx_path),
-            )
-
-        self._database.write(write)
-
-    def mark_application_failed(self, work: ApplicationWork, error: str) -> None:
-        """Persist a retryable browser failure and release its lease."""
-        def write(connection: sqlite3.Connection) -> None:
-            connection.execute(
-                """UPDATE applications
-                   SET status = 'failed', error = ?, lease_expires_at = NULL,
-                       updated_at = CURRENT_TIMESTAMP
-                   WHERE source_signature = ? AND source_url = ? AND resolved_url = ?
-                     AND status = 'processing'""",
-                (error, work.source_signature, work.source_url, work.resolved_url),
-            )
-            self._record_pipeline_error_in_transaction(
-                connection,
-                stage="application_worker",
-                message=error,
-                source_signature=work.source_signature,
-                source_url=work.source_url,
-                resolved_url=work.resolved_url,
-            )
-
-        self._database.write(write)
-
-    def application_status(
-        self, source_signature: str, source_url: str, resolved_url: str
-    ) -> str | None:
-        """Return a durable application state for an API or worker test."""
-        return self._database.read(
-            lambda connection: (
-                row[0]
-                if (
-                    row := connection.execute(
-                        """SELECT status FROM applications
-                           WHERE source_signature = ? AND source_url = ? AND resolved_url = ?""",
-                        (source_signature, source_url, resolved_url),
-                    ).fetchone()
-                )
-                else None
-            )
-        )
-
-    def application_count_for_resolved_url(self, resolved_url: str) -> int:
-        """Return the durable application-record count for one provider URL."""
-        return self._database.read(
-            lambda connection: connection.execute(
-                "SELECT COUNT(*) FROM applications WHERE resolved_url = ?", (resolved_url,)
-            ).fetchone()[0]
-        )
-
-    def application_error(
-        self, source_signature: str, source_url: str, resolved_url: str
-    ) -> str | None:
-        """Return the latest safe failure reason recorded by the application worker."""
-        return self._database.read(
-            lambda connection: (
-                row[0]
-                if (
-                    row := connection.execute(
-                        """SELECT error FROM applications
-                           WHERE source_signature = ? AND source_url = ? AND resolved_url = ?""",
-                        (source_signature, source_url, resolved_url),
-                    ).fetchone()
-                )
-                else None
-            )
-        )
+        self._database.write(lambda c: c.execute("UPDATE emails SET processing_state = 'pending', processed_at = NULL, processing_error = NULL"))

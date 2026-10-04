@@ -113,6 +113,7 @@ def test_form_failure_persists_generic_and_openrouter_reason_in_application_erro
     assert error is not None
     assert "no visible contact form" in error
     assert "OpenRouter fallback failed" in error
-    failures = database.recent_pipeline_errors()
-    assert failures[0].stage == "application_worker"
-    assert "no visible contact form" in failures[0].message
+    database.refresh_error_summaries()
+    summary = database.error_summaries()[0]
+    assert summary.source_table == "provider_listings"
+    assert "no visible contact form" in summary.error_message

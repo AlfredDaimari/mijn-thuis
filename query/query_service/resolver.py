@@ -197,7 +197,7 @@ def resolve_once(
                     room_count = details.room_count
                     if room_count != item.room_count:
                         item = type(item)(
-                            item.source_signature, item.url, item.title, item.source_subject, room_count
+                            item.id, item.email_id, item.stekkies_url, item.title, item.source_subject, room_count
                         )
                     database.add_resolved_listing_and_mark_source_read(item, destination.url, details)
                     logging.info(
@@ -213,13 +213,7 @@ def resolve_once(
                     resolved += 1
                 except Exception as error:
                     current_url, page_title = _page_diagnostics(page)
-                    database.record_pipeline_error(
-                        stage="resolver",
-                        message=str(error),
-                        source_signature=item.source_signature,
-                        source_url=item.url,
-                        resolved_url=attempt.get("final_url"),
-                    )
+                    database.mark_link_failed(item.id, str(error))
                     logging.exception(
                         "Could not resolve Stekkies listing; leaving it unread for retry "
                         "| title=%s | source_url=%s | step=%s | action_role=%s "

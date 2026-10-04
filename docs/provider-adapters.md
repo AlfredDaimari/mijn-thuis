@@ -18,13 +18,10 @@ must never click submit during a dry-run evaluation.
 
 ## Choosing the next provider
 
-The resolver records every newly resolved provider URL in the SQLite
-`provider_sources` table. Rank providers by `resolved_count` before adding an
-adapter: frequent domains deserve custom work first.
-
-Use the `PipelineDatabase.provider_source_tally()` method, rather than placing
-SQL in a worker. The tally is incremented in the same transaction that saves
-a new resolved URL, so retries do not inflate it.
+The resolver records each canonical provider URL in `provider_listings`. Rank
+providers with a grouped count of `provider_url` hosts before adding an adapter:
+frequent domains deserve custom work first. Keep that reporting query in the
+future observability/API layer rather than placing SQL in a browser worker.
 
 ## Adapter contract
 
@@ -73,7 +70,8 @@ is not called for that hostname.
    password, identity-document, payment, or CAPTCHA inputs.
 5. Run the adapter on several saved/resolved URLs in no-submit mode. Save a
    full viewport screenshot after scrolling to the form before filling and a
-   second screenshot after filling. Record both against `resolved_listings.id`.
+   second screenshot after filling. Record both against `provider_listings.id`
+   with the current attempt number.
 6. Log the adapter name, hostname, navigation step, fields filled, and error
    reason without logging personal values, cookies, or API keys.
 7. Add pytest coverage using fake Playwright pages for successful form reveal,
@@ -87,7 +85,7 @@ is not called for that hostname.
 If a form is absent, hidden, gated by login, inside an unsupported iframe, or
 protected by CAPTCHA, return a clear failure reason. When the OpenRouter fallback is
 attempted, concatenate its planning or execution failure with that original
-generic reason and store it in `applications.error`. If OpenRouter says login is
+generic reason and store it in `provider_listings.processing_error`. If OpenRouter says login is
 required but the hostname has no `accounts.yaml` entry, persist that error and
 do not register an account, guess a password, or bypass access controls. Leave
 the record observable for a future site-specific adapter or manual workflow.
