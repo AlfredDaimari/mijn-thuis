@@ -137,6 +137,14 @@ containing at most one allowed `click` or `login` candidate. Playwright checks
 that candidate again before using it, and never receives a model instruction
 to submit, register, consent, pay, solve a CAPTCHA, or enter form values.
 
+If the page visibly offers account creation/registration (including Dutch
+controls such as **Inschrijven**), the worker stops before an LLM call or
+click. It records that account creation is required on the provider-listing
+row. Create that provider account manually, then add its credentials to the
+ignored `accounts.yaml` before a later, deliberate retry. An existing-account
+**Inloggen** path remains separate and can use only credentials explicitly
+configured for that provider.
+
 ## SQLite and deployment rules
 
 - Use exactly one replica of each of the four live workers initially.

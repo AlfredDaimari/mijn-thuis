@@ -54,8 +54,8 @@ _INSTRUCTIONS = """You plan exactly one smallest safe next step for a Dutch or E
 housing-provider page. A deterministic Playwright form matcher has failed.
 Return JSON matching the supplied schema. Choose `click` only for a supplied,
 visible contact, interest, viewing, or application-navigation control. Choose
-`login` only when the page visibly requires a provider account before its form;
-the caller may have no credentials. Never choose submit, registration, consent,
+`login` only when the page visibly requires an existing provider account before its form;
+the caller may have no credentials. Never choose account creation, registration, consent,
 payment, CAPTCHA, password, account-management, arbitrary selectors, URLs, or
 form values. This worker fills a form for review but does not submit it."""
 

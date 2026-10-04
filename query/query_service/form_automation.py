@@ -20,6 +20,10 @@ _UNSAFE_NAVIGATION_WORDS = (
     "registr", "account", "password", "wachtwoord", "captcha", "payment", "betalen",
     "consent", "akkoord", "accept",
 )
+_ACCOUNT_CREATION_WORDS = (
+    "create account", "create an account", "sign up", "signup", "register", "registr",
+    "account aanmaken", "maak een account", "nieuw account", "nieuwe account", "inschrijven",
+)
 
 
 def field_kind(metadata: dict[str, Any]) -> str | None:
@@ -55,6 +59,22 @@ def visible_navigation_candidates(page: Any) -> list[dict[str, Any]]:
             visible: !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length)
         })).filter(candidate => candidate.visible).slice(0, 40)"""
     )
+
+
+def account_creation_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return visible controls that start a new-account/registration flow.
+
+    Existing-account login is handled separately when the user supplies a
+    provider credential. Registration is deliberately never automated.
+    """
+    return [
+        candidate
+        for candidate in candidates
+        if any(
+            word in " ".join((str(candidate.get("text", "")), str(candidate.get("aria", "")))).lower()
+            for word in _ACCOUNT_CREATION_WORDS
+        )
+    ]
 
 
 def _contact_form(page: Any) -> Any:
@@ -103,11 +123,18 @@ def apply_navigation_plan(page: Any, plan: NavigationPlan) -> int:
         if action.candidate_index < 0 or action.candidate_index >= controls.count():
             raise FormAutomationError(f"OpenRouter chose unavailable control index {action.candidate_index}")
         control = controls.nth(action.candidate_index)
-        if not control.is_visible():
-            raise FormAutomationError(f"OpenRouter chose hidden control index {action.candidate_index}")
         text = " ".join(
             filter(None, [control.inner_text(), control.get_attribute("aria-label") or ""])
         ).lower()
+        label = text.strip()[:160] or "unlabelled control"
+        if not control.is_visible():
+            raise FormAutomationError(
+                f"OpenRouter chose hidden control index {action.candidate_index} ({label})"
+            )
+        if any(word in text for word in _ACCOUNT_CREATION_WORDS):
+            raise FormAutomationError(
+                f"provider requires account creation before application ({label}); registration is not automated"
+            )
         if any(word in text for word in _UNSAFE_NAVIGATION_WORDS):
             raise FormAutomationError("OpenRouter chose a prohibited navigation control")
         if not any(word in text for word in _SAFE_NAVIGATION_WORDS):

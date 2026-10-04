@@ -19,6 +19,7 @@ from .config import AccountCredentials, ApplicantProfile, load_accounts, load_se
 from .database import ApplicationWork, PipelineDatabase
 from .form_automation import (
     FormAutomationError,
+    account_creation_candidates,
     apply_navigation_plan,
     fill_generic_form,
     login_to_provider,
@@ -114,6 +115,17 @@ def _fill_for_review(
                         break
                     except FormAutomationError as generic_error:
                         generic_reason = str(generic_error)
+                    candidates = visible_navigation_candidates(page)
+                    registrations = account_creation_candidates(candidates)
+                    if registrations:
+                        labels = ", ".join(
+                            (str(candidate.get("text") or candidate.get("aria") or "unlabelled control"))[:160]
+                            for candidate in registrations[:3]
+                        )
+                        raise FormAutomationError(
+                            "provider requires account creation before application; registration is intentionally "
+                            f"not automated (visible control: {labels})"
+                        )
                     if step == MAX_MODEL_STEPS:
                         raise FormAutomationError(
                             f"generic form matching failed: {generic_reason}; "
@@ -123,7 +135,7 @@ def _fill_for_review(
                         plan = planner.plan(
                             work.resolved_url,
                             generic_reason,
-                            visible_navigation_candidates(page),
+                            candidates,
                         )
                         if not plan.actions:
                             raise FormAutomationError(
