@@ -161,7 +161,7 @@ def resolve_once(
     limit: int = 50,
     playwright_factory: Callable[[], object] | None = None,
 ) -> int:
-    """Resolve unread Stekkies links, retaining failures for a later retry."""
+    """Resolve pending Stekkies links, preserving failures as terminal errors."""
     if playwright_factory is None:
         try:
             from playwright.sync_api import sync_playwright
@@ -172,17 +172,16 @@ def resolve_once(
             ) from error
         playwright_factory = sync_playwright
 
-    queued = database.unread_listings(limit=limit)
-    if not queued:
-        return 0
-
     resolved = 0
     with playwright_factory() as playwright:
         browser = playwright.chromium.launch(headless=True)
         context = browser.new_context()
         try:
             context.add_cookies(parse_cookie_header(cookie))
-            for item in queued:
+            for _ in range(limit):
+                item = database.claim_next_stekkies_link()
+                if item is None:
+                    break
                 page = context.new_page()
                 destination = page
                 attempt: dict[str, str] = {"step": "creating browser page", "action_role": "none"}
@@ -199,7 +198,7 @@ def resolve_once(
                         item = type(item)(
                             item.id, item.email_id, item.stekkies_url, item.title, item.source_subject, room_count
                         )
-                    database.add_resolved_listing_and_mark_source_read(item, destination.url, details)
+                    database.add_provider_listing_and_mark_link_processed(item, destination.url, details)
                     logging.info(
                         "Resolved listing URL | title=%s | location=%s | rent_cents=%s | area_m2=%s | rooms=%s | source_url=%s | resolved_url=%s",
                         item.title or "(no title)",
@@ -215,7 +214,7 @@ def resolve_once(
                     current_url, page_title = _page_diagnostics(page)
                     database.mark_link_failed(item.id, str(error))
                     logging.exception(
-                        "Could not resolve Stekkies listing; leaving it unread for retry "
+                        "Could not resolve Stekkies listing; marked source link error "
                         "| title=%s | source_url=%s | step=%s | action_role=%s "
                         "| current_url=%s | final_url=%s | action_href=%s | page_title=%r | error=%s",
                         item.title or "(no title)",

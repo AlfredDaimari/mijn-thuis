@@ -16,15 +16,16 @@ def resolved_listing(database: PipelineDatabase) -> None:
     database.add_listing_if_new(
         "email-1", "https://www.stekkies.com/redirect/1", "View match", "Listings"
     )
-    listing = database.unread_listings()[0]
+    listing = database.claim_next_stekkies_link()
+    assert listing is not None
     database.add_resolved_listing_and_mark_source_read(
         listing, "https://provider.example/listing/1"
     )
 
 
 @pytest.mark.database
-def test_application_claim_acknowledges_resolved_item_and_retries_failure(tmp_path) -> None:
-    """One durable application claim consumes one resolved queue item exactly once."""
+def test_application_claim_marks_failed_work_terminally(tmp_path) -> None:
+    """One durable application claim does not silently retry a provider failure."""
     database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
     resolved_listing(database)
 
@@ -37,9 +38,7 @@ def test_application_claim_acknowledges_resolved_item_and_retries_failure(tmp_pa
 
     second_claim = database.claim_next_application()
 
-    assert second_claim is not None
-    assert second_claim.attempt_count == 2
-    assert second_claim.resolved_url == first_claim.resolved_url
+    assert second_claim is None
     assert database.application_count_for_resolved_url(first_claim.resolved_url) == 1
 
 

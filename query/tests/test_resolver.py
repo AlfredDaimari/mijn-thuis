@@ -132,7 +132,10 @@ def test_resolved_provider_url_is_queued_once_across_source_emails(tmp_path) -> 
     database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
     database.add_listing_if_new("email-1", "https://stekkies.test/1", None, "Listings")
     database.add_listing_if_new("email-2", "https://stekkies.test/2", None, "Listings")
-    first, second = database.unread_listings()
+    first = database.claim_next_stekkies_link()
+    second = database.claim_next_stekkies_link()
+    assert first is not None
+    assert second is not None
 
     assert database.add_resolved_listing_and_mark_source_read(first, "https://provider.test/home/42")
     assert not database.add_resolved_listing_and_mark_source_read(second, "https://provider.test/home/42")
@@ -140,8 +143,8 @@ def test_resolved_provider_url_is_queued_once_across_source_emails(tmp_path) -> 
 
 
 @pytest.mark.resolver
-def test_resolver_logs_context_and_retries_when_click_fails(caplog, tmp_path) -> None:
-    """An expired browser session logs diagnostics and leaves the listing unread."""
+def test_resolver_logs_context_and_marks_link_error_when_click_fails(caplog, tmp_path) -> None:
+    """An expired browser session logs diagnostics and leaves a terminal link error."""
     database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
     database.add_listing_if_new(
         "email-1", "https://email.stekkies.com/e/c/42", "View match", "Listings"
@@ -154,8 +157,8 @@ def test_resolver_logs_context_and_retries_when_click_fails(caplog, tmp_path) ->
         )
 
     assert count == 0
-    assert len(database.unread_listings()) == 1
+    assert len(database.unread_listings()) == 0
     assert database.unread_resolved_listings() == []
-    assert "leaving it unread for retry" in caplog.text
+    assert "marked source link error" in caplog.text
     assert "step=locating Go to listing action" in caplog.text
     assert "current_url=https://www.stekkies.com/e/c/42" in caplog.text

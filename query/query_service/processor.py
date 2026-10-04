@@ -11,10 +11,21 @@ from .database import PipelineDatabase
 
 
 def process_once(database: PipelineDatabase) -> int:
-    """Process the unread queue in one process; return the number handled."""
+    """Claim pending emails, then make each one processed or error."""
     handled = 0
-    for email in database.unread_emails():
-        listings = extract_listings(email.raw_message)
+    while email := database.claim_next_email():
+        try:
+            listings = extract_listings(email.raw_message)
+        except Exception as error:
+            logging.exception(
+                "Could not extract Stekkies links | message_id=%s | subject=%r | error=%s",
+                email.message_id or "unknown",
+                email.subject or "(no subject)",
+                error,
+            )
+            database.mark_email_read(email.signature, extraction_error=str(error))
+            handled += 1
+            continue
         if not listings:
             error = "No listing links could be extracted from a Stekkies email"
             logging.error(
@@ -27,9 +38,20 @@ def process_once(database: PipelineDatabase) -> int:
             handled += 1
             continue
 
-        queued = database.add_listings_and_mark_email_read(
-            email, [(listing.url, listing.title, listing.room_count) for listing in listings]
-        )
+        try:
+            queued = database.add_links_and_mark_email_processed(
+                email, [(listing.url, listing.title, listing.room_count) for listing in listings]
+            )
+        except Exception as error:
+            logging.exception(
+                "Could not store extracted Stekkies links | message_id=%s | subject=%r | error=%s",
+                email.message_id or "unknown",
+                email.subject or "(no subject)",
+                error,
+            )
+            database.mark_email_read(email.signature, extraction_error=str(error))
+            handled += 1
+            continue
         for listing in queued:
             logging.info(
                 "Queued Stekkies listing | message_id=%s | subject=%r | title=%r | rooms=%s | url=%s",

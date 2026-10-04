@@ -33,7 +33,9 @@ MAX_MODEL_STEPS = 3
 
 
 def _screenshot_key(work: ApplicationWork) -> str:
-    identity = "\n".join((work.source_signature, work.source_url, work.resolved_url))
+    # The canonical provider-listing ID and attempt make evidence stable and
+    # avoid depending on discarded source-link fields.
+    identity = f"{work.id}\n{work.attempt_count}\n{work.resolved_url}"
     return f"{hashlib.sha256(identity.encode('utf-8')).hexdigest()}.png"
 
 
@@ -165,7 +167,7 @@ def process_once(
     max_attempts: int = 3,
 ) -> int:
     """Process one provider page and stop before any irreversible submission."""
-    work = database.claim_next_application(
+    work = database.claim_next_provider_listing(
         lease_seconds=lease_seconds, max_attempts=max_attempts
     )
     if work is None:
@@ -183,7 +185,7 @@ def process_once(
                 work, screenshot_directory, profile, planner, accounts or {}
             )
             screenshot_stage = "after_fill"
-        database.mark_application_awaiting_review(
+        database.mark_provider_listing_processed(
             work, screenshot_key, screenshot_stage=screenshot_stage
         )
         logging.info(
@@ -195,9 +197,9 @@ def process_once(
         )
         return 1
     except Exception as error:
-        database.mark_application_failed(work, str(error))
+        database.mark_provider_listing_failed(work, str(error))
         logging.exception(
-            "Provider listing capture failed; marked retryable failure "
+            "Provider listing capture failed; marked provider listing error "
             "| title=%r | provider_url=%s | attempt=%d | error=%s",
             work.title or "(no title)", work.resolved_url, work.attempt_count, error,
         )

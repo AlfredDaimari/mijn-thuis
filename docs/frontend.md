@@ -52,7 +52,7 @@ and does not prove the server identity.
 | Tab | Data shown | Primary source | Notes |
 | --- | --- | --- | --- |
 | Listings | Every extracted candidate, its email/link/application state, provider URL, title, location, rooms, monthly rent, and area. | `emails`, `stekkies_links`, `provider_listings` | Starts as the main inbox, including links not yet resolved. |
-| Applied | Only rows with `provider_listings.processing_state = submitted`; later include submission timestamp and confirmation evidence. | `provider_listings`, `screenshots` | `awaiting_review` is not an application submission and must not appear as applied. |
+| Applied | Only rows with `provider_listings.status = submitted`; later include submission timestamp and confirmation evidence. | `provider_listings`, `screenshots` | `awaiting_review` is not an application submission and must not appear as applied. |
 | Evidence | Before-fill, after-fill, before-submit, and after-submit screenshots for one selected provider listing attempt. | `screenshots` | The API returns Nginx-relative image paths only after authenticating the caller. |
 | Failed | At the bottom of the tab, row-level email/link/provider errors plus their aggregate summary, newest first. | source-table `processing_error` fields and `error_summaries` | Show retry count, timestamp, source URL, and safe diagnostic text; never credentials or raw email. |
 

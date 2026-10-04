@@ -28,9 +28,9 @@ for the dashboard, authentication, HTTPS, and pagination plan.
 
 | Table | Source of truth | Key fields |
 | --- | --- | --- |
-| `emails` | A Yahoo message fetched by the poller. | `id`, unique `signature`, optional unique `message_id`, raw email, `accessed_at`, `processing_state`, `processed_at`, `processing_error`. |
-| `stekkies_links` | One actionable Stekkies link extracted from an email. | `id`, `email_id`, unique `(email_id, stekkies_url)`, optional `provider_listing_id`, title/room count, processing outcome and error. |
-| `provider_listings` | One canonical provider URL: the actual house/application record. | `id`, unique `provider_url`, provider details, application `processing_state`, retries/lease, local error, and latest `screenshot_id`. |
+| `emails` | A Yahoo message fetched by the poller. | `id`, unique `signature`, optional unique `message_id`, raw email, `accessed_at`, `status`, `processed_at`, `processing_error`, claim count/lease. |
+| `stekkies_links` | One actionable Stekkies link extracted from an email. | `id`, `email_id`, unique `(email_id, stekkies_url)`, optional `provider_listing_id`, title/room count, `status`, result/error, claim count/lease. |
+| `provider_listings` | One canonical provider URL: the actual house/application record. | `id`, unique `provider_url`, provider details, application `status`, retries/lease, local error, and latest `screenshot_id`. |
 | `screenshots` | Immutable browser evidence for a provider listing attempt. | `id`, `provider_listing_id`, attempt number, stage, Nginx-relative path, capture time. |
 | `error_summaries` | A rebuildable observability projection, not a worker error log. | source table, error fingerprint/message, count, first/last failure, refresh time. |
 
@@ -41,15 +41,19 @@ show a quick error count without scanning all history.
 
 Processing states are explicit:
 
-- Emails: `pending`, `succeeded`, or `failed`.
-- Stekkies links: `pending`, `succeeded`, or `failed`.
+- Emails: `pending`, `processing`, `processed`, or `error`.
+- Stekkies links: `pending`, `processing`, `processed`, or `error`.
 - Provider listings: `pending`, `processing`, `awaiting_review`, `submitted`,
-  or `failed`.
+  or `error`.
 
-`processed_at` is set on every success or failure. A `failed` row must have a
-non-empty `processing_error`; successful and pending rows must not. Queue
-queries use `(processing_state, id)` indexes, so workers find pending work
-without scanning completed history.
+Every worker atomically claims exactly one `pending` row by setting `status`
+to `processing`. Its completion transaction creates/reuses the next-table row
+and changes the claimed source row to `processed`; any exception changes that
+same source row to `error` with `processing_error`. `error` rows are terminal:
+no normal worker query reclaims them. Requeueing is a deliberate operator
+action after the cause is understood. An abandoned `processing` lease is also
+made terminal `error`, rather than silently retried. `processed_at` is set on
+every terminal transition, and `(status, id)` indexes keep claims bounded.
 
 The prior `seen_emails`, `listings`, `resolved_listings`, `applications`,
 `listing_details`, `application_screenshots`, `provider_sources`, and
@@ -63,12 +67,12 @@ only use the five tables above.
 | Worker | Command | Reads | Writes |
 | --- | --- | --- | --- |
 | Yahoo poller | `python -m query_service` | Yahoo IMAP | inserts `emails` as `pending` |
-| Extractor | `python -m query_service.processor` | pending `emails` | inserts `stekkies_links`, marks email succeeded/failed |
-| Resolver | `python -m query_service.resolver` | pending/failed `stekkies_links` | inserts/links a `provider_listings` row, marks link succeeded/failed |
-| Provider review worker | `python -m query_service.application_worker` | pending/failed `provider_listings` | claims the row, fills/captures evidence, updates state/error and `screenshots` |
+| Extractor | `python -m query_service.processor` | claims pending `emails` | inserts deduplicated `stekkies_links`, then marks email `processed` or `error` |
+| Resolver | `python -m query_service.resolver` | claims pending `stekkies_links` | inserts/reuses `provider_listings`, then marks link `processed` or `error` |
+| Provider review worker | `python -m query_service.application_worker` | claims pending `provider_listings` | fills/captures evidence, then marks `awaiting_review` or `error` and writes `screenshots` |
 
 Each handoff is one short SQLite transaction: create or find the downstream
-row, then mark the source row successful. No transaction is held during IMAP,
+row, then mark the claimed source row `processed`. No transaction is held during IMAP,
 Playwright navigation, provider login, or screenshot capture.
 
 The resolver may extract explicit provider title, location, rent in cents,

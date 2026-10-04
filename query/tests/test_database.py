@@ -14,14 +14,14 @@ from query_service.extractor import ListingDetails
 pytestmark = pytest.mark.database
 
 
-def test_single_pipeline_database_indexes_each_pending_entity(tmp_path) -> None:
-    """One file indexes each source-of-truth processing state."""
+def test_single_pipeline_database_indexes_each_status_queue(tmp_path) -> None:
+    """One file indexes each source-of-truth status queue."""
     path = tmp_path / "pipeline.sqlite3"
     PipelineDatabase(path)
     indexes = (
-        ("emails_processing_id_idx", ("processing_state", "id")),
-        ("stekkies_links_processing_id_idx", ("processing_state", "id")),
-        ("provider_listings_processing_id_idx", ("processing_state", "id")),
+        ("emails_status_id_idx", ("status", "id")),
+        ("stekkies_links_status_id_idx", ("status", "id")),
+        ("provider_listings_status_id_idx", ("status", "id")),
         ("error_summaries_latest_idx", ("last_failed_at", "source_table", "error_fingerprint")),
     )
 
@@ -78,12 +78,13 @@ def test_room_count_flows_from_listing_to_resolved_and_application_work(tmp_path
     database.add_listing_if_new(
         "email-1", "https://stekkies.test/1", "View match: 3-kamerwoning", "Listings", room_count=3
     )
-    listing = database.unread_listings()[0]
+    listing = database.claim_next_stekkies_link()
+    assert listing is not None
 
     assert database.add_resolved_listing_and_mark_source_read(
         listing, "https://provider.test/home/42"
     )
-    assert database.unread_resolved_listings()[0].room_count == 3
+    assert database.pending_provider_listings()[0].room_count == 3
 
     application = database.claim_next_application()
 
@@ -95,7 +96,8 @@ def test_resolved_listing_keeps_normalized_provider_details_for_the_frontend(tmp
     """Resolved provider facts are stored once and can be joined by provider URL."""
     database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
     database.add_listing_if_new("email-1", "https://stekkies.test/1", "View match", "Listings")
-    listing = database.unread_listings()[0]
+    listing = database.claim_next_stekkies_link()
+    assert listing is not None
 
     database.add_resolved_listing_and_mark_source_read(
         listing,
@@ -137,8 +139,8 @@ def test_poller_writes_while_processor_reads_without_losing_emails(tmp_path) -> 
     def reader() -> None:
         try:
             start.wait()
-            while not writer_finished.is_set() or database.unread_emails():
-                for email in database.unread_emails(limit=10):
+            while not writer_finished.is_set() or database.pending_emails():
+                while email := database.claim_next_email():
                     database.mark_email_read(email.signature)
                     handled.add(email.signature)
                 time.sleep(0.001)
@@ -157,4 +159,4 @@ def test_poller_writes_while_processor_reads_without_losing_emails(tmp_path) -> 
     assert not reader_thread.is_alive(), "reader did not finish"
     assert errors == []
     assert handled == {f"signature-{number}" for number in range(40)}
-    assert database.unread_emails() == []
+    assert database.pending_emails() == []

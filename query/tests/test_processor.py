@@ -99,6 +99,8 @@ def test_processor_persists_extracted_room_count_through_the_listing_queue(tmp_p
     assert process_once(database) == 1
     assert database.unread_listings()[0].room_count == 2
 
+    link = database.claim_next_stekkies_link()
+    assert link is not None
     database.mark_listing_read("signature", "https://houses.test/42")
     assert database.unread_listings() == []
 
@@ -110,7 +112,9 @@ def test_database_can_requeue_a_read_email_for_controlled_replay(tmp_path) -> No
     database.remember_if_new(
         "signature", "<id>", "alerts@stekkies.com", "Listings", raw_email("https://houses.test/42")
     )
-    database.mark_email_read("signature")
+    claim = database.claim_next_email()
+    assert claim is not None
+    database.mark_email_read(claim.signature)
 
     assert database.unread_emails() == []
     database.mark_email_unread("signature")
@@ -135,3 +139,25 @@ def test_processor_logs_and_marks_read_when_email_has_no_listing(caplog, tmp_pat
     summary = database.error_summaries()[0]
     assert summary.source_table == "emails"
     assert "No listing links" in summary.error_message
+
+
+@pytest.mark.service
+def test_processor_marks_claimed_email_error_when_parser_raises(monkeypatch, caplog, tmp_path) -> None:
+    """A parser exception cannot strand a claimed email in processing."""
+    database = PipelineDatabase(tmp_path / "pipeline.sqlite3")
+    database.remember_if_new(
+        "signature", "<id>", "alerts@stekkies.com", "Listings", raw_email("anything")
+    )
+    monkeypatch.setattr(
+        "query_service.processor.extract_listings",
+        lambda _raw: (_ for _ in ()).throw(ValueError("malformed MIME body")),
+    )
+
+    with caplog.at_level("ERROR"):
+        assert process_once(database) == 1
+
+    assert database.pending_emails() == []
+    database.refresh_error_summaries()
+    summary = database.error_summaries()[0]
+    assert summary.source_table == "emails"
+    assert summary.error_message == "malformed MIME body"
