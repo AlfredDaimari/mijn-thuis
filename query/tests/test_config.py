@@ -63,6 +63,21 @@ def test_load_settings_reads_optional_applicant_messages_and_openrouter_settings
     assert settings.openrouter_model == "openai/gpt-6-luna"
 
 
+def test_load_settings_reads_dashboard_authentication_without_logging_it(tmp_path) -> None:
+    values = tmp_path / "values.yaml"
+    values.write_text(
+        "email: person@yahoo.com\npassword: app-password\n"
+        "frontend_auth:\n  username: dashboard\n  password: dashboard-password\n",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(values)
+
+    assert settings.frontend_auth is not None
+    assert settings.frontend_auth.username == "dashboard"
+    assert settings.frontend_auth.password == "dashboard-password"
+
+
 def test_load_accounts_reads_only_the_configured_provider_credentials(tmp_path) -> None:
     """Credentials are separate from values.yaml and keyed by provider host."""
     accounts = tmp_path / "accounts.yaml"

@@ -50,23 +50,65 @@ _PLAN_SCHEMA: dict[str, Any] = {
     },
 }
 
-_INSTRUCTIONS = """You plan exactly one smallest safe next step for a Dutch or English
-housing-provider page. A deterministic Playwright form matcher has failed.
-Return JSON matching the supplied schema. Choose `click` only for a supplied,
-visible contact, interest, viewing, or application-navigation control. Choose
-`login` only when the page visibly requires an existing provider account before its form;
-the caller may have no credentials. Never choose account creation, registration, consent,
-payment, CAPTCHA, password, account-management, arbitrary selectors, URLs, or
-form values. This worker fills a form for review but does not submit it."""
+_INSTRUCTIONS = """You are the navigation planner for a Dutch-first housing listing
+workflow. Deterministic form matching failed, so infer the current page state from the
+redacted visible candidates and return exactly one smallest safe next step as JSON.
+`visible_navigation_candidates` is an ordered list. Use its explicit zero-based
+`candidate_index` exactly; never use `dom_index`, text position, a guessed selector, or a URL.
+
+Reason in this order, and do not skip a higher-priority state:
+1. Cookie/privacy overlay: do not accept all cookies, consent, or marketing. The deterministic
+   worker handles an explicit Dutch reject/essential-only option; if none is visible, return no
+   action rather than clicking a random control.
+2. A visible applicant contact form: do not navigate. Search bars, newsletter forms and
+   password login forms are not applicant contact forms. The caller will fill fields. A visible `Verzenden`,
+   `Verstuur`, `Aanvragen`, `Submit`, or `Reageer` control at the end of a form is submission,
+   not navigation, and must never be selected.
+3. A listing CTA that reveals the form: choose the smallest supplied visible control whose Dutch
+   meaning is clearly interest/contact/viewing navigation. Prefer `Ik heb interesse`, `Interesse
+   tonen`, `Reageer op deze woning`, `Reageren`, `Contact opnemen`, `Neem contact op`,
+   `Bezichtiging aanvragen`, `Vraag een bezichtiging aan`, `Plan een bezichtiging`, `Afspraak
+   maken`, `Meer informatie`, or `Bekijk woning`. English equivalents include `I’m interested`,
+   `Contact`, `Contact us`, `Request a viewing`, `Schedule a viewing`, and `Apply`.
+4. Existing-account gate: choose `login` only when the page visibly asks for an existing account
+   and credentials may be configured. `Inloggen`/`Log in` is not registration.
+5. Confirmation, error, CAPTCHA, payment, or account-creation state: return no action and explain
+   the state. Never attempt to bypass it.
+
+Dutch is first-class: understand inflections such as `interesse`, `reageer`, `reageren`,
+`bezichtiging`, `bezichtigingen`, `aanvraag`, and `aanvragen`, but treat `Inschrijven`,
+`Registreren`, `Account aanmaken`, and `Aanmelden` as registration unless the surrounding label
+clearly proves it means an existing login. Hash anchors such as `#subscribe-form` are safe only
+when the supplied label clearly opens that contact/viewing form.
+
+The optional `applicant_context` contains only non-identifying facts relevant to provider fields,
+for example `current_housing_situation: Huurwoning` and
+`registered_in_netherlands: true`. Use those facts to explain which Dutch form state is expected,
+but never invent a value, expose personal contact data, or treat context as permission to accept
+consent or submit.
+
+Never choose consent/terms/privacy, `Akkoord`, `Accept`, `Alle cookies accepteren`, password,
+CAPTCHA, payment, account creation, registration, arbitrary navigation, form values, or a final
+submission control. This worker prepares evidence only; it does not submit, create accounts,
+accept consent, or perform credit checks."""
 
 
-def planning_input(url: str, generic_failure_reason: str, candidates: list[dict[str, Any]]) -> str:
+def planning_input(
+    url: str,
+    generic_failure_reason: str,
+    candidates: list[dict[str, Any]],
+    applicant_context: dict[str, str | bool] | None = None,
+    page_state: dict[str, Any] | None = None,
+) -> str:
     """Build a redacted model input, including why generic matching failed."""
     return json.dumps(
         {
             "provider_host": (urlparse(url).hostname or "unknown").lower(),
+            "page_path": urlparse(url).path or "/",
             "generic_failure_reason": generic_failure_reason,
             "visible_navigation_candidates": candidates,
+            "applicant_context": applicant_context or {},
+            "page_state": page_state or {},
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -93,7 +135,13 @@ class OpenRouterFormPlanner:
         self._client = client
 
     def plan(
-        self, url: str, generic_failure_reason: str, candidates: list[dict[str, Any]]
+        self,
+        url: str,
+        generic_failure_reason: str,
+        candidates: list[dict[str, Any]],
+        *,
+        applicant_context: dict[str, str | bool] | None = None,
+        page_state: dict[str, Any] | None = None,
     ) -> NavigationPlan:
         if not self._api_key:
             raise OpenRouterPlanningError(
@@ -112,7 +160,16 @@ class OpenRouterFormPlanner:
                 model=self._model,
                 messages=[
                     {"role": "system", "content": _INSTRUCTIONS},
-                    {"role": "user", "content": planning_input(url, generic_failure_reason, candidates)},
+                    {
+                        "role": "user",
+                        "content": planning_input(
+                            url,
+                            generic_failure_reason,
+                            candidates,
+                            applicant_context,
+                            page_state,
+                        ),
+                    },
                 ],
                 response_format={
                     "type": "json_schema",
@@ -133,11 +190,18 @@ class OpenRouterFormPlanner:
 
         try:
             actions = tuple(
-                PlannedAction(action=str(action["action"]), candidate_index=int(action["candidate_index"]))
+                PlannedAction(
+                    action=str(action["action"]),
+                    candidate_index=int(action["candidate_index"]),
+                )
                 for action in payload["actions"]
             )
             reason = str(payload["reason"]).strip()
-            if not reason or len(actions) > 1 or any(action.action not in {"click", "login"} for action in actions):
+            if (
+                not reason
+                or len(actions) > 1
+                or any(action.action not in {"click", "login"} for action in actions)
+            ):
                 raise ValueError("invalid plan action or reason")
             return NavigationPlan(reason=reason, actions=actions)
         except (KeyError, TypeError, ValueError) as error:

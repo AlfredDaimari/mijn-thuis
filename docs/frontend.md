@@ -1,15 +1,14 @@
 # Frontend and API plan
 
+The implemented dashboard now uses a dedicated sign-in page and cookie sessions, a combined Inbox, server-paginated Listings/Applications/Evidence, and website/class failure drilldowns. The earlier planning details below are retained as design history. See [the current repair handoff](2026-10-12-repair-handoff.md) for implemented behavior and verification.
+
 ## Scope and boundaries
 
-The frontend will be a small React + TypeScript application using Material UI.
-It is a read-only operational view of the housing pipeline at first: it may
-show listings, application state, errors, and evidence, but it must never read
-SQLite or the screenshot directory directly. A local Python API owns all
-database reads and runs behind Nginx at `/api/`.
-
-No frontend or API implementation is included in this change. This document is
-the implementation contract for the later work.
+The frontend is a small React + TypeScript application using Material UI. It is
+a read-only operational view of the housing pipeline: it may show listings,
+application state, errors, and evidence, but it never reads SQLite or the
+screenshot directory directly. A private FastAPI container owns database reads;
+the Docker frontend Nginx exposes it only behind `/api/`.
 
 ## Access control and HTTPS
 
@@ -29,11 +28,11 @@ bundle, returned by the API, or logged. Deployment will create a root-readable
 for `/`, `/api/`, and `/screenshots/`. The API still independently rejects
 unauthenticated requests; Nginx is not the only authorization boundary.
 
-The canonical public origin will be HTTPS, using
-`https://vps-24228540.vps.ovh.net/` unless a custom domain is added. The
-hostname currently resolves to this VPS. Let’s Encrypt HTTP-01 can validate it
-when port 80 is publicly reachable and Nginx serves the ACME challenge for that
-hostname. The HTTPS deployment will:
+The canonical public origin is HTTPS at
+`https://vps-24228540.vps.ovh.net/` unless a custom domain is added. Let’s
+Encrypt HTTP-01 is configured through `ansible/deploy-https.sh`; Certbot uses
+the Nginx-served `/var/www/certbot` webroot and its systemd renewal timer. The
+deployment:
 
 1. request and automatically renew a Let’s Encrypt certificate with Certbot;
 2. serve `/.well-known/acme-challenge/` over port 80 only for validation;
@@ -47,14 +46,15 @@ use a custom domain whose DNS is controlled by the account owner. Do not use a
 self-signed certificate for the real dashboard: it creates browser warnings
 and does not prove the server identity.
 
-## Four tabs
+## Five tabs
 
 | Tab | Data shown | Primary source | Notes |
 | --- | --- | --- | --- |
+| Overview | Current selected-month pipeline counts, including submitted, awaiting-review, and failed. | `emails`, `stekkies_links`, `provider_listings` | Uses neutral status labels and exact dynamic failure counts. |
 | Listings | Every extracted candidate, its email/link/application state, provider URL, title, location, rooms, monthly rent, and area. | `emails`, `stekkies_links`, `provider_listings` | Starts as the main inbox, including links not yet resolved. |
 | Applied | Only rows with `provider_listings.status = submitted`; later include submission timestamp and confirmation evidence. | `provider_listings`, `screenshots` | `awaiting_review` is not an application submission and must not appear as applied. |
 | Evidence | Before-fill, after-fill, before-submit, and after-submit screenshots for one selected provider listing attempt. | `screenshots` | The API returns Nginx-relative image paths only after authenticating the caller. |
-| Failed | At the bottom of the tab, row-level email/link/provider errors plus their aggregate summary, newest first. | source-table `processing_error` fields and `error_summaries` | Show retry count, timestamp, source URL, and safe diagnostic text; never credentials or raw email. |
+| Failed | Row-level email/link/provider errors plus a selected-period summary, newest first. | Source-table `processing_error` fields | The API dynamically queries the three source tables for the selected month; the frontend shows the returned URL/error counts, retry count, timestamp, source URL where available, and safe diagnostic text. Never expose credentials or raw email. |
 
 Each provider listing uses the stable `provider_listings.id` once resolution
 succeeds. Its optional `screenshot_id` identifies the latest useful evidence;
@@ -64,21 +64,22 @@ or fabricating a location, price, or room count.
 
 ## API shape and pagination
 
-The API will be implemented as a separate local container listening only on
-`127.0.0.1:8000`; Nginx proxies `/api/` to it. All list endpoints use
+The API runs in a private Compose service; the frontend Nginx is its only HTTP
+peer. All list endpoints use
 server-side cursor pagination, never a database dump into the browser.
 
 | Endpoint | Cursor sort | Page size | Response fields |
 | --- | --- | --- | --- |
-| `GET /api/listings` | `(accessed_at DESC, provider_listing_id DESC)` | default 25, max 100 | `items`, `next_cursor` |
-| `GET /api/applications?status=submitted` | `(processed_at DESC, provider_listing_id DESC)` | default 25, max 100 | `items`, `next_cursor` |
+| `GET /api/stats?from=&to=` | — | — | source status counts and exact failure counts |
+| `GET /api/listings?from=&to=` | `(accessed_at DESC, stekkies_link_id DESC)` | default 25, max 100 | `items`, `next_cursor` |
+| `GET /api/applications?status=submitted&from=&to=` | `(processed_at DESC, provider_listing_id DESC)` | default 25, max 100 | `items`, `next_cursor` |
 | `GET /api/provider-listings/{provider_listing_id}/screenshots` | `(captured_at ASC, screenshot_id ASC)` | default 25, max 100 | `items`, `next_cursor` |
-| `GET /api/failures` | `(last_failed_at DESC, source_table, error_fingerprint)` | default 25, max 100 | `items`, `next_cursor` |
+| `GET /api/failures?from=&to=` | `(processed_at DESC, source_table, source_id DESC)` | default 25, max 100 | `items`, `next_cursor` |
 
 The cursor is opaque, URL-safe, and encodes the exact final sort values; it is
 not an offset. This prevents rows being skipped or duplicated when workers add
 new listings while the user is paging. Every query must apply a deterministic
-tie-breaker (`provider_listing_id`, screenshot ID, or error fingerprint) and a matching
+tie-breaker (`provider_listing_id`, screenshot ID, or source ID) and a matching
 SQLite index. The response also carries a small `summary` count for tab badges,
 but pagination controls never depend on totals being exact during active work.
 
@@ -105,9 +106,9 @@ and opened at natural size in a dialog. A missing image renders an explicit
 
 1. Add HTTPS plus Basic Auth to the Nginx deployment and verify renewal.
 2. Implement read-only API authentication, cursor queries, and API tests.
-3. Build the Material UI shell and the Listings tab against mock API data.
-4. Add Applied, Evidence, and Failed tabs with pagination and empty/error
-   states.
+3. Build the Material UI shell and the Listings tab against the API.
+4. Add Overview, Applied, Evidence, and Failed tabs with pagination and
+   empty/error states.
 5. Connect to the VPS only after API, auth, and browser tests pass locally.
 
 Automatic form submission remains a separate safety decision. This frontend

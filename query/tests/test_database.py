@@ -22,7 +22,6 @@ def test_single_pipeline_database_indexes_each_status_queue(tmp_path) -> None:
         ("emails_status_id_idx", ("status", "id")),
         ("stekkies_links_status_id_idx", ("status", "id")),
         ("provider_listings_status_id_idx", ("status", "id")),
-        ("error_summaries_latest_idx", ("last_failed_at", "source_table", "error_fingerprint")),
     )
 
     for index_name, expected_columns in indexes:
@@ -68,8 +67,22 @@ def test_legacy_pipeline_tables_migrate_to_the_linear_schema(tmp_path) -> None:
     assert database.listing_details_for_provider_url("https://provider.test/1").room_count == 2
     with sqlite3.connect(path) as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    assert {"emails", "stekkies_links", "provider_listings", "screenshots", "error_summaries"} <= tables
+    assert {"emails", "stekkies_links", "provider_listings", "screenshots"} <= tables
+    assert "error_summaries" not in tables
     assert "seen_emails" not in tables
+
+
+def test_startup_removes_obsolete_error_summary_table(tmp_path) -> None:
+    """Aggregates are computed from source rows and are no longer persisted."""
+    path = tmp_path / "pipeline.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE error_summaries (message TEXT NOT NULL)")
+
+    PipelineDatabase(path)
+
+    with sqlite3.connect(path) as connection:
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "error_summaries" not in tables
 
 
 def test_room_count_flows_from_listing_to_resolved_and_application_work(tmp_path) -> None:

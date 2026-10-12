@@ -32,7 +32,10 @@ services:
 
   application-review:
     <<: *worker
-    command: ["python", "-m", "query_service.application_worker"]
+    command: ["python", "-m", "query_service.application_worker", "--submit", "--allow-credit-check", "--max-attempts", "10"]
+    environment:
+      APPLICANT_HOUSING_SITUATION: ${APPLICANT_HOUSING_SITUATION:-Huurwoning}
+      APPLICANT_REGISTERED_NL: ${APPLICANT_REGISTERED_NL:-true}
     mem_limit: 1g
     shm_size: 512mb
     volumes:
@@ -45,10 +48,53 @@ services:
         source: ${QUERY_VALUES_FILE:-./query/values.yaml}
         target: /app/values.yaml
         read_only: true
+
+  api:
+    image: house-query-api:local
+    build:
+      context: ./query
+      dockerfile: Dockerfile.api
+    init: true
+    restart: unless-stopped
+    command: ["uvicorn", "--factory", "query_service.api:create_app", "--host", "0.0.0.0", "--port", "8000"]
+    volumes:
+      - type: volume
+        source: house-query-data
+        target: /app/data
       - type: bind
-        source: ${QUERY_ACCOUNTS_FILE:-./query/accounts.yaml}
-        target: /app/accounts.yaml
+        source: ${QUERY_VALUES_FILE:-./query/values.yaml}
+        target: /app/values.yaml
         read_only: true
+    expose:
+      - "8000"
+    mem_limit: 256m
+    environment:
+      APPLICANT_HOUSING_SITUATION: ${APPLICANT_HOUSING_SITUATION:-Huurwoning}
+      APPLICANT_REGISTERED_NL: ${APPLICANT_REGISTERED_NL:-true}
+
+  frontend:
+    image: house-frontend:local
+    build:
+      context: ./frontend
+      dockerfile: nginx/Dockerfile
+    init: true
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      # The existing host Nginx reverse-proxies this private port. For a
+      # Docker-only deployment, set HOUSE_FRONTEND_PORT=80 after freeing it.
+      - "127.0.0.1:${HOUSE_FRONTEND_PORT:-8080}:80"
+    volumes:
+      - type: bind
+        source: ${HOUSE_SCREENSHOTS_DIR:-/srv/house-bot/screenshots}
+        target: /screenshots
+        read_only: true
+      - type: bind
+        source: ${QUERY_VALUES_FILE:-./query/values.yaml}
+        target: /run/house-bot/values.yaml
+        read_only: true
+    mem_limit: 128m
 
 volumes:
   house-query-data:

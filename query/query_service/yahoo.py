@@ -4,6 +4,7 @@ import hashlib
 import imaplib
 import re
 import ssl
+from datetime import date, timedelta
 from dataclasses import dataclass
 from email import policy
 from email.header import decode_header, make_header
@@ -103,7 +104,16 @@ class YahooMailbox:
             )
         return self.client
 
-    def fetch_stekkies_messages(self) -> list[ListingEmail]:
+    def fetch_stekkies_messages(self, *, days_back: int = 1) -> list[ListingEmail]:
+        """Fetch Stekkies messages received within the requested calendar window.
+
+        Yahoo's IMAP ``SINCE`` criterion is inclusive by calendar date.  The
+        caller uses a wider window for the first service poll and a one-day
+        window for steady-state polling; the SQLite signature remains the
+        source of truth for deduplication.
+        """
+        if days_back < 1:
+            raise ValueError("days_back must be at least 1")
         client = self._connect()
         client.login(self.email, self.password)
         status, _ = client.select("INBOX", readonly=True)
@@ -111,7 +121,10 @@ class YahooMailbox:
             raise RuntimeError("Could not open Yahoo INBOX read-only")
 
         # This server-side filter avoids downloading unrelated mailbox content.
-        status, data = client.uid("SEARCH", None, "FROM", STEKKIES_DOMAIN)
+        since = (date.today() - timedelta(days=days_back)).strftime("%d-%b-%Y")
+        status, data = client.uid(
+            "SEARCH", None, "FROM", STEKKIES_DOMAIN, "SINCE", since
+        )
         if status != "OK":
             raise RuntimeError("Could not search Yahoo INBOX")
 

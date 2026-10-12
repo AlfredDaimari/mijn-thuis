@@ -2,7 +2,12 @@
 
 import pytest
 
-from query_service.form_automation import FormAutomationError, account_creation_candidates, apply_navigation_plan
+from query_service.form_automation import (
+    FormAutomationError,
+    account_creation_candidates,
+    apply_navigation_plan,
+    dismiss_cookie_banner,
+)
 from query_service.openrouter_form_planner import NavigationPlan, PlannedAction
 
 
@@ -32,6 +37,27 @@ def test_openrouter_cannot_click_a_registration_control() -> None:
     assert not control.clicked
 
 
+def test_openrouter_can_click_a_dutch_viewing_request_control() -> None:
+    """A Dutch request-viewing action is safe navigation, not registration."""
+    control = _FakeControl("Bezichtiging aanvragen")
+    page = _FakePage(control)
+    plan = NavigationPlan("Open the viewing request form", (PlannedAction("click", 0),))
+
+    assert apply_navigation_plan(page, plan) == 1
+    assert control.clicked
+    assert page.selector == "button:visible, a:visible, [role=button]:visible"
+
+
+def test_cookie_overlay_uses_only_reject_or_necessary_option() -> None:
+    reject = _FakeControl("Alleen noodzakelijke cookies")
+    accept = _FakeControl("Alle cookies accepteren")
+    page = _FakePage(reject, accept)
+
+    assert dismiss_cookie_banner(page)
+    assert reject.clicked
+    assert not accept.clicked
+
+
 class _FakeControl:
     def __init__(self, text: str) -> None:
         self.text = text
@@ -51,19 +77,24 @@ class _FakeControl:
 
 
 class _FakeControls:
-    def __init__(self, control: _FakeControl) -> None:
-        self.control = control
+    def __init__(self, *controls: _FakeControl) -> None:
+        self.controls = controls
 
     def count(self) -> int:
-        return 1
+        return len(self.controls)
 
-    def nth(self, _index: int) -> _FakeControl:
-        return self.control
+    def nth(self, index: int) -> _FakeControl:
+        return self.controls[index]
 
 
 class _FakePage:
-    def __init__(self, control: _FakeControl) -> None:
-        self.controls = _FakeControls(control)
+    def __init__(self, *controls: _FakeControl) -> None:
+        self.controls = _FakeControls(*controls)
+        self.selector = None
 
-    def locator(self, _selector: str) -> _FakeControls:
+    def locator(self, selector: str) -> _FakeControls:
+        self.selector = selector
         return self.controls
+
+    def wait_for_load_state(self, *_args, **_kwargs) -> None:
+        return None

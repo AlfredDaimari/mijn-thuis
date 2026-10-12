@@ -44,6 +44,24 @@ def test_planner_prompt_retains_the_deterministic_failure_reason() -> None:
     assert "applicant" not in prompt
 
 
+def test_planner_prompt_includes_only_non_identifying_applicant_context() -> None:
+    """Luna may use Dutch housing context without receiving contact details."""
+    prompt = json.loads(
+        planning_input(
+            "https://provider.example/listing/4",
+            "no visible contact form",
+            [],
+            {"current_housing_situation": "Huurwoning", "registered_in_netherlands": True},
+        )
+    )
+
+    assert prompt["applicant_context"] == {
+        "current_housing_situation": "Huurwoning",
+        "registered_in_netherlands": True,
+    }
+    assert "email" not in prompt
+
+
 def test_planner_uses_openrouter_structured_plan_and_no_unrestricted_actions() -> None:
     """The OpenRouter model can return only one typed Playwright step."""
     client = FakeClient()

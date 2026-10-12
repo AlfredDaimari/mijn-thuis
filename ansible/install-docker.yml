@@ -13,7 +13,9 @@
 
     - name: Install Docker Engine from the distribution repository
       ansible.builtin.apt:
-        name: docker.io
+        name:
+          - docker.io
+          - docker-compose-v2
         state: present
 
     - name: Install Nginx for frontend, API, and screenshot routing
@@ -31,28 +33,6 @@
       loop:
         - /srv/house-bot/frontend
         - /srv/house-bot/screenshots
-
-    - name: Configure the house-bot Nginx virtual host
-      ansible.builtin.template:
-        src: nginx-house-bot.conf.j2
-        dest: /etc/nginx/sites-available/house-bot
-        owner: root
-        group: root
-        mode: "0644"
-      notify: Reload Nginx
-
-    - name: Enable the house-bot Nginx virtual host
-      ansible.builtin.file:
-        src: /etc/nginx/sites-available/house-bot
-        dest: /etc/nginx/sites-enabled/house-bot
-        state: link
-      notify: Reload Nginx
-
-    - name: Disable the default Nginx virtual host
-      ansible.builtin.file:
-        path: /etc/nginx/sites-enabled/default
-        state: absent
-      notify: Reload Nginx
 
     - name: Enable and start Docker
       ansible.builtin.service:

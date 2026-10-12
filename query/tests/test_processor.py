@@ -1,6 +1,7 @@
 """Service and unit tests for extracting listings from raw Stekkies emails."""
 
 from email.message import EmailMessage
+import sqlite3
 
 import pytest
 
@@ -135,10 +136,9 @@ def test_processor_logs_and_marks_read_when_email_has_no_listing(caplog, tmp_pat
     assert "No listing links could be extracted" in caplog.text
     assert database.unread_emails() == []
     assert database.unread_listings() == []
-    database.refresh_error_summaries()
-    summary = database.error_summaries()[0]
-    assert summary.source_table == "emails"
-    assert "No listing links" in summary.error_message
+    with sqlite3.connect(tmp_path / "pipeline.sqlite3") as connection:
+        error = connection.execute("SELECT processing_error FROM emails WHERE signature = 'signature'").fetchone()[0]
+    assert "No listing links" in error
 
 
 @pytest.mark.service
@@ -157,7 +157,6 @@ def test_processor_marks_claimed_email_error_when_parser_raises(monkeypatch, cap
         assert process_once(database) == 1
 
     assert database.pending_emails() == []
-    database.refresh_error_summaries()
-    summary = database.error_summaries()[0]
-    assert summary.source_table == "emails"
-    assert summary.error_message == "malformed MIME body"
+    with sqlite3.connect(tmp_path / "pipeline.sqlite3") as connection:
+        error = connection.execute("SELECT processing_error FROM emails WHERE signature = 'signature'").fetchone()[0]
+    assert error == "malformed MIME body"

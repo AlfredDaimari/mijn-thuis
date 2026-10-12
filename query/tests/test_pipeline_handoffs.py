@@ -101,8 +101,8 @@ def test_link_error_is_terminal_and_excluded_from_normal_resolution(tmp_path) ->
     assert _rows(path, "provider_listings") == []
 
 
-def test_provider_error_is_terminal_and_summarized_from_source_row(tmp_path) -> None:
-    """The final worker records failure on provider_listings; summary is derived later."""
+def test_provider_error_is_terminal_on_the_source_row(tmp_path) -> None:
+    """The final worker keeps its failure on provider_listings for observability."""
     path = tmp_path / "pipeline.sqlite3"
     database = PipelineDatabase(path)
     assert database.add_listing_if_new("email", "https://www.stekkies.test/redirect/1", "Home", "Listings")
@@ -116,8 +116,6 @@ def test_provider_error_is_terminal_and_summarized_from_source_row(tmp_path) -> 
 
     assert _rows(path, "provider_listings") == [(listing.id, "error", "no supported contact form")]
     assert database.claim_next_provider_listing() is None
-    assert database.refresh_error_summaries() == 1
-    assert database.error_summaries()[0].source_table == "provider_listings"
 
 
 def test_first_refactor_state_column_is_rebuilt_as_status(tmp_path) -> None:

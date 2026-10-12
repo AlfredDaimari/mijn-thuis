@@ -1,5 +1,6 @@
 """Service-group tests for read-only Yahoo polling."""
 
+from datetime import date, timedelta
 from email.message import EmailMessage
 
 import pytest
@@ -25,6 +26,7 @@ class FakeImap:
     def __init__(self, messages: list[bytes]) -> None:
         self.messages = messages
         self.fetch_commands: list[tuple[object, ...]] = []
+        self.search_commands: list[tuple[object, ...]] = []
 
     def login(self, user: str, password: str):
         self.login_values = (user, password)
@@ -36,6 +38,7 @@ class FakeImap:
 
     def uid(self, command: str, *args):
         if command == "SEARCH":
+            self.search_commands.append(args)
             return "OK", [b"1 2"]
         if command == "FETCH":
             self.fetch_commands.append(args)
@@ -98,6 +101,12 @@ def test_poller_queues_a_new_email_without_changing_yahoo_read_state(tmp_path) -
     assert len(queued) == 1
     assert queued[0].raw_message == raw_messages[0]
     assert fake_imap.selected == ("INBOX", True)
+    assert fake_imap.search_commands[0][-2:] == (
+        "SINCE", (date.today() - timedelta(days=10)).strftime("%d-%b-%Y")
+    )
+    assert fake_imap.search_commands[1][-2:] == (
+        "SINCE", (date.today() - timedelta(days=1)).strftime("%d-%b-%Y")
+    )
     assert all(command[1] == "(BODY.PEEK[])" for command in fake_imap.fetch_commands)
 
 

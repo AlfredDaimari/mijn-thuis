@@ -2,13 +2,20 @@
 email: "you@yahoo.com"
 password: "your-yahoo-app-password"
 
-# One SQLite file contains emails, Stekkies links, provider listings,
-# screenshots, and derived error summaries.
+# One SQLite file contains emails, Stekkies links, provider listings, and
+# screenshots. Dashboard failure summaries are calculated from source rows.
 database: "data/pipeline.sqlite3"
 
+# Credentials for the private observability dashboard. Keep the real values in
+# the ignored values.yaml file; they must never be bundled into the frontend or
+# returned by the API. The sign-in API uses these to issue a secure session cookie.
+frontend_auth:
+  username: "change-me"
+  password: "change-me"
+
 # Used only by the provider-form worker. Keep the real values in the ignored
-# values.yaml file. The worker must run with --dry-run until form filling has
-# been validated against live provider pages.
+# values.yaml file. Production runs with --submit; real names are required.
+# Without --submit, the worker records an explicit unsent dry-run result.
 applicant:
   first_name: "Your first name"
   last_name: "Your last name"
@@ -34,6 +41,10 @@ applicant:
 
     Kind regards,
     Alfred Daimari and Chris Benhard
+  # Non-identifying context used for Dutch provider fields and OpenRouter
+  # navigation reasoning. Keep these values aligned with the applicant.
+  current_housing_situation: "Huurwoning"
+  registered_in_netherlands: true
 
 # Optional OpenRouter fallback for unsupported form navigation. This is a secret;
 # do not commit it. It is not sent unless deterministic form matching fails.

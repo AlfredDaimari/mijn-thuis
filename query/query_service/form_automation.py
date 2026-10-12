@@ -6,6 +6,7 @@ from typing import Any
 
 from .config import AccountCredentials, ApplicantProfile
 from .openrouter_form_planner import NavigationPlan
+from .provider_forms import ProviderFormError, prepare_form
 
 
 class FormAutomationError(RuntimeError):
@@ -13,17 +14,107 @@ class FormAutomationError(RuntimeError):
 
 
 _SAFE_NAVIGATION_WORDS = (
-    "contact", "reageer", "interesse", "bezichtig", "apply", "application", "viewing",
+    "contact",
+    "reageer",
+    "interesse",
+    "bezichtig",
+    "bezichtiging",
+    "aanvraag",
+    "aanvragen",
+    "viewing",
+    "request a viewing",
+    "schedule a viewing",
+    "apply",
+    "application",
+    "reageren",
+    "informatie",
+    "afspraak",
+    "bezichting",
 )
 _UNSAFE_NAVIGATION_WORDS = (
-    "submit", "verzenden", "verstuur", "login", "log in", "inloggen", "register",
-    "registr", "account", "password", "wachtwoord", "captcha", "payment", "betalen",
-    "consent", "akkoord", "accept",
+    "submit",
+    "verzenden",
+    "verstuur",
+    "login",
+    "log in",
+    "inloggen",
+    "register",
+    "registr",
+    "account",
+    "password",
+    "wachtwoord",
+    "captcha",
+    "payment",
+    "betalen",
+    "consent",
+    "akkoord",
+    "accept",
 )
 _ACCOUNT_CREATION_WORDS = (
-    "create account", "create an account", "sign up", "signup", "register", "registr",
-    "account aanmaken", "maak een account", "nieuw account", "nieuwe account", "inschrijven",
+    "create account",
+    "create an account",
+    "sign up",
+    "signup",
+    "register",
+    "registr",
+    "account aanmaken",
+    "maak een account",
+    "nieuw account",
+    "nieuwe account",
+    "inschrijven",
 )
+_COOKIE_REJECT_WORDS = (
+    "weiger",
+    "afwij",
+    "weigeren",
+    "alleen noodzakelijke",
+    "alleen functionele",
+    "reject",
+    "decline",
+    "essential cookies",
+    "necessary cookies",
+    "only necessary",
+    "essentiële",
+    "essentiele",
+    "enkel essenti",
+    "alleen vereist",
+)
+
+
+def dismiss_cookie_banner(page: Any) -> bool:
+    """Dismiss a cookie overlay only through a reject/necessary option.
+
+    Cookie overlays commonly intercept provider navigation clicks.  Accepting
+    all cookies is not an application prerequisite, so the worker never does
+    that; it may choose an explicit reject/essential-only control instead.
+    """
+    controls = page.locator("button:visible, a:visible, [role=button]:visible")
+    for index in range(controls.count()):
+        control = controls.nth(index)
+        text = (
+            " ".join(
+                filter(
+                    None,
+                    [control.inner_text(), control.get_attribute("aria-label") or ""],
+                )
+            )
+            .strip()
+            .lower()
+        )
+        if not any(word in text for word in _COOKIE_REJECT_WORDS):
+            continue
+        if "cookie" not in text and text not in {
+            "weigeren",
+            "alles weigeren",
+            "afwijzen",
+            "reject all",
+            "reject",
+            "decline",
+        }:
+            continue
+        control.click(timeout=10_000)
+        return True
+    return False
 
 
 def field_kind(metadata: dict[str, Any]) -> str | None:
@@ -40,7 +131,10 @@ def field_kind(metadata: dict[str, Any]) -> str | None:
         return "first_name"
     if any(word in text for word in ("achternaam", "last", "surname")):
         return "last_name"
-    if any(word in text for word in ("bericht", "message", "comment")) or metadata.get("tag") == "textarea":
+    if (
+        any(word in text for word in ("bericht", "message", "comment"))
+        or metadata.get("tag") == "textarea"
+    ):
         return "message"
     if "naam" in text or "name" in text:
         return "full_name"
@@ -49,19 +143,29 @@ def field_kind(metadata: dict[str, Any]) -> str | None:
 
 def visible_navigation_candidates(page: Any) -> list[dict[str, Any]]:
     """Return a small, redacted description of visible possible navigation."""
-    return page.locator("button, a, [role=button]").evaluate_all(
+    return page.locator(
+        "button:visible, a:visible, [role=button]:visible"
+    ).evaluate_all(
         """els => els.map((element, dom_index) => ({
             dom_index,
+            id: element.id || '',
             tag: element.tagName.toLowerCase(),
+            role: element.getAttribute('role') || '',
+            type: element.getAttribute('type') || '',
             text: (element.innerText || '').trim().slice(0, 160),
             aria: element.getAttribute('aria-label') || '',
+            title: element.getAttribute('title') || '',
             href: element.getAttribute('href') || '',
+            disabled: !!element.disabled,
             visible: !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length)
-        })).filter(candidate => candidate.visible).slice(0, 40)"""
+        })).slice(0, 120)
+          .map((candidate, candidate_index) => ({...candidate, candidate_index}))"""
     )
 
 
-def account_creation_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def account_creation_candidates(
+    candidates: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     """Return visible controls that start a new-account/registration flow.
 
     Existing-account login is handled separately when the user supplies a
@@ -71,7 +175,10 @@ def account_creation_candidates(candidates: list[dict[str, Any]]) -> list[dict[s
         candidate
         for candidate in candidates
         if any(
-            word in " ".join((str(candidate.get("text", "")), str(candidate.get("aria", "")))).lower()
+            word
+            in " ".join(
+                (str(candidate.get("text", "")), str(candidate.get("aria", "")))
+            ).lower()
             for word in _ACCOUNT_CREATION_WORDS
         )
     ]
@@ -88,43 +195,37 @@ def _contact_form(page: Any) -> Any:
 
 def fill_generic_form(page: Any, profile: ApplicantProfile, message: str) -> list[str]:
     """Fill recognised visible fields without submitting or changing consent."""
-    form = _contact_form(page)
-    fields = form.locator("input, textarea").evaluate_all(
-        """els => els.map((element, index) => ({
-            index, tag: element.tagName.toLowerCase(), name: element.name, id: element.id,
-            placeholder: element.placeholder, aria: element.getAttribute('aria-label') || '',
-            label: element.labels?.[0]?.innerText || '', type: element.type || ''
-        }))"""
-    )
-    filled: list[str] = []
-    for field in fields:
-        kind = field_kind(field)
-        if not kind or field.get("type") in {"hidden", "checkbox", "radio", "submit", "password"}:
-            continue
-        value = (
-            f"{profile.first_name} {profile.last_name}"
-            if kind == "full_name"
-            else message if kind == "message" else getattr(profile, kind)
-        )
-        form.locator("input, textarea").nth(field["index"]).fill(value)
-        filled.append(kind)
-    if not filled:
-        raise FormAutomationError("visible form has no recognised writable applicant fields")
-    return filled
+    try:
+        return prepare_form(page, profile, message).fields
+    except ProviderFormError as error:
+        raise FormAutomationError(str(error)) from None
 
 
 def apply_navigation_plan(page: Any, plan: NavigationPlan) -> int:
     """Execute one allow-listed navigation click; submission is impossible here."""
-    controls = page.locator("button, a, [role=button]")
+    # This selector must match the candidate list above.  The model receives
+    # the ordinal among visible candidates, not an index into hidden DOM
+    # controls; using the unfiltered locator here can click the wrong element.
+    controls = page.locator("button:visible, a:visible, [role=button]:visible")
     clicked = 0
     for action in plan.actions:
         if action.action != "click":
             raise FormAutomationError("OpenRouter requested a non-navigation action")
         if action.candidate_index < 0 or action.candidate_index >= controls.count():
-            raise FormAutomationError(f"OpenRouter chose unavailable control index {action.candidate_index}")
+            raise FormAutomationError(
+                f"OpenRouter chose unavailable control index {action.candidate_index}"
+            )
         control = controls.nth(action.candidate_index)
+        if hasattr(control, "evaluate") and control.evaluate(
+            "e => !!e.form && ((e.tagName==='BUTTON' && e.type==='submit') || (e.tagName==='INPUT' && e.type==='submit'))"
+        ):
+            raise FormAutomationError(
+                "OpenRouter chose a form submission control during navigation"
+            )
         text = " ".join(
-            filter(None, [control.inner_text(), control.get_attribute("aria-label") or ""])
+            filter(
+                None, [control.inner_text(), control.get_attribute("aria-label") or ""]
+            )
         ).lower()
         label = text.strip()[:160] or "unlabelled control"
         if not control.is_visible():
@@ -136,20 +237,28 @@ def apply_navigation_plan(page: Any, plan: NavigationPlan) -> int:
                 f"provider requires account creation before application ({label}); registration is not automated"
             )
         if any(word in text for word in _UNSAFE_NAVIGATION_WORDS):
-            raise FormAutomationError("OpenRouter chose a prohibited navigation control")
+            raise FormAutomationError(
+                "OpenRouter chose a prohibited navigation control"
+            )
         if not any(word in text for word in _SAFE_NAVIGATION_WORDS):
-            raise FormAutomationError("OpenRouter chose a control that is not contact/application navigation")
+            raise FormAutomationError(
+                "OpenRouter chose a control that is not contact/application navigation"
+            )
         control.click(timeout=10_000)
         page.wait_for_load_state("domcontentloaded", timeout=10_000)
         clicked += 1
     if not clicked:
-        raise FormAutomationError(f"OpenRouter found no safe navigation action: {plan.reason}")
+        raise FormAutomationError(
+            f"OpenRouter found no safe navigation action: {plan.reason}"
+        )
     return clicked
 
 
 def login_to_provider(page: Any, credentials: AccountCredentials) -> None:
     """Fill a conventional provider login form and submit only that login request."""
-    username = page.locator("input[type=email], input[name*=email i], input[name*=user i]").first
+    username = page.locator(
+        "input[type=email], input[name*=email i], input[name*=user i]"
+    ).first
     password = page.locator("input[type=password]").first
     if not username.is_visible() or not password.is_visible():
         raise FormAutomationError(

@@ -1,0 +1,92 @@
+---
+- name: Issue and renew the House Bot TLS certificate
+  hosts: docker_hosts
+  become: true
+  gather_facts: false
+
+  vars:
+    house_bot_domain: vps-24228540.vps.ovh.net
+    certbot_webroot: /var/www/certbot
+
+  tasks:
+    - name: Install Certbot and Docker Compose v2
+      ansible.builtin.apt:
+        name:
+          - certbot
+          - docker-compose-v2
+        state: present
+        update_cache: true
+
+    - name: Create the ACME challenge webroot
+      ansible.builtin.file:
+        path: "{{ certbot_webroot }}/.well-known/acme-challenge"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Serve the ACME challenge before initial certificate issuance
+      ansible.builtin.template:
+        src: nginx-house-bot-bootstrap.conf.j2
+        dest: /etc/nginx/sites-available/house-bot
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Validate the bootstrap Nginx configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Reload Nginx with the ACME challenge route
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+
+    - name: Obtain the certificate with HTTP-01
+      ansible.builtin.command:
+        argv:
+          - certbot
+          - certonly
+          - --webroot
+          - --webroot-path={{ certbot_webroot }}
+          - --domain={{ house_bot_domain }}
+          - --agree-tos
+          - --non-interactive
+          - --register-unsafely-without-email
+          - --keep-until-expiring
+      args:
+        creates: "/etc/letsencrypt/live/{{ house_bot_domain }}/fullchain.pem"
+
+    - name: Configure the HTTPS edge proxy
+      ansible.builtin.template:
+        src: nginx-house-bot-https.conf.j2
+        dest: /etc/nginx/sites-available/house-bot
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload Nginx
+
+    - name: Validate the HTTPS Nginx configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Enable and start Certbot renewal timer
+      ansible.builtin.service:
+        name: certbot.timer
+        state: started
+        enabled: true
+
+    - name: Reload Nginx with TLS enabled
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+
+    - name: Verify certificate renewal can complete
+      ansible.builtin.command: certbot renew --dry-run
+      changed_when: false
+
+  handlers:
+    - name: Reload Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
