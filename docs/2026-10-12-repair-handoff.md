@@ -63,3 +63,17 @@ A live successful application must not be claimed until the real applicant profi
 Build images on the VPS from a source/template-only archive. Exclude `values.yaml`, `accounts.yaml`, SQLite data, node_modules, virtualenvs, generated assets and TypeScript build caches. Back up the live `mijn-thuis.sqlite3` before migration/requeue. Preserve screenshots and the existing VPS configuration. Inspect `docker compose ps`, authenticated pagination and screenshot access after deployment.
 
 Changes are committed locally for the user to push; deployment does not push the repository to a Git remote.
+
+## Deployment result
+
+The repaired stack was activated on the VPS after a consistent SQLite backup at `/app/data/mijn-thuis-before-app-repair-20261012T221909.sqlite3` in the named data volume. All 157 old review-state rows were migrated to pending and 545 unsent errors were requeued, preserving attempt numbers and screenshots. The queue now contains 702 pending listings and no review-state rows. No real application is claimed as sent: the worker is running and explicitly paused on the configured test names.
+
+All six Compose services are running. The public sign-in page at `https://vps-24228540.vps.ovh.net` was checked in desktop and mobile Chromium with no JavaScript errors. Login, Secure/HttpOnly cookies, logout, protected screenshot access and server pagination were smoke-tested through frontend Nginx. Login returned 200; authenticated screenshot access returned 200/image/png; logout returned 200; screenshot access without a session returned 401. Listings pages contained disjoint sets with a full total of 702. Inbox total was 699; Evidence total was 157.
+
+The local suite passed 65 tests; a separately mounted test snapshot passed 64 tests inside the actual VPS worker image, with the live mailbox test deselected. Deployment source hashes for the worker and form module match the committed local source. The React production bundle and an isolated Chromium UI interaction check passed.
+
+A Docker cache snapshot export initially failed. A fresh API build and sequential worker rebuild recovered it without deleting application data or volumes. A public-URL probe from inside Docker also hit the VPS hostname's loopback mapping; the externally tested HTTPS page and internal frontend route both worked. No DNS change was made.
+
+Implementation commit: `4a2a314` (`Repair application submission and dashboard observability`). A follow-up documentation commit records these results. Git has not been pushed.
+
+Remaining operator action: replace the test placeholders in the VPS `query/values.yaml` applicant first/last names with the correct real names. The running worker reloads that configuration on its five-minute cycle; restart only `application-review` to pick it up immediately. The dashboard reports this blocker. Woonzeker's sampled page still clears values and remains a provider-specific validation failure; CAPTCHA, account credentials and additional required fields also remain explicit blockers.
